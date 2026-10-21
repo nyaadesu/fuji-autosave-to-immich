@@ -1,0 +1,97 @@
+#!/bin/sh
+# Post-batch hook for fuji-autosave-receiver.
+#
+# Uploads every pending batch list in $FUJI_STATE_DIR/batches/ to Immich with
+# the Immich CLI and moves the uploaded files to an archive folder. A batch that
+# fails stays queued and is retried the next time the hook runs (Immich dedupes
+# by checksum, so retries are safe).
+#
+# Settings come from the environment and from $FUJI_ENV_FILE
+# (default /etc/fuji-autosave/env; see packaging/fuji-autosave.env.example):
+#   IMMICH_INSTANCE_URL, IMMICH_API_KEY   required, read by the Immich CLI
+#   FUJI_IMMICH_ALBUM     album to add uploads to (optional)
+#   FUJI_ARCHIVE_DIR      where uploaded files go (default $FUJI_INBOX/archive)
+#   FUJI_KEEP_FILES=1     leave uploaded files in the inbox instead
+#   IMMICH_BIN            Immich CLI command (default: immich)
+#
+# Set by the receiver: FUJI_STATE_DIR, FUJI_INBOX, FUJI_CAMERA_NAME, FUJI_BATCH_*
+# Run it by hand as the service user to retry pending batches.
+set -u
+
+# Settings file shared with the service; values already in the environment win
+ENV_FILE=${FUJI_ENV_FILE:-/etc/fuji-autosave/env}
+if [ -r "$ENV_FILE" ]; then
+	saved=$(export -p)
+	set -a
+	. "$ENV_FILE"
+	set +a
+	eval "$saved"
+fi
+FUJI_STATE_DIR=${FUJI_STATE_DIR:-/var/lib/fuji-autosave}
+
+: "${FUJI_STATE_DIR:?FUJI_STATE_DIR is not set}"
+: "${FUJI_INBOX:?FUJI_INBOX is not set}"
+: "${IMMICH_INSTANCE_URL:?IMMICH_INSTANCE_URL is not set}"
+: "${IMMICH_API_KEY:?IMMICH_API_KEY is not set}"
+export IMMICH_INSTANCE_URL IMMICH_API_KEY
+IMMICH_BIN=${IMMICH_BIN:-immich}
+ARCHIVE=${FUJI_ARCHIVE_DIR:-$FUJI_INBOX/archive}
+BATCHES=$FUJI_STATE_DIR/batches
+
+log() { echo "immich-hook: $*" >&2; }
+
+# One hook at a time; a later run waits, then picks up whatever is still queued.
+# (Plain flock: busybox's has no -w timeout.)
+exec 9>"$FUJI_STATE_DIR/hook.lock"
+flock 9 || { log "cannot lock $FUJI_STATE_DIR/hook.lock"; exit 1; }
+
+archive_file() {
+	f=$1
+	day=$(basename "$(dirname "$f")")
+	mkdir -p "$ARCHIVE/$day" || return 1
+	dest=$ARCHIVE/$day/$(basename "$f")
+	if [ -e "$dest" ]; then
+		dest=$ARCHIVE/$day/$(date +%s)-$(basename "$f")
+	fi
+	mv -n "$f" "$dest"
+}
+
+uploaded=0
+failed=0
+for list in "$BATCHES"/*.list; do
+	[ -e "$list" ] || continue
+
+	# Files that still exist (a retried batch may be partly archived already)
+	set --
+	while IFS= read -r f; do
+		[ -n "$f" ] && [ -f "$f" ] && set -- "$@" "$f"
+	done < "$list"
+	if [ $# -eq 0 ]; then
+		rm -f "$list"
+		continue
+	fi
+
+	log "uploading $# file(s) from $(basename "$list")"
+	if [ -n "${FUJI_IMMICH_ALBUM:-}" ]; then
+		"$IMMICH_BIN" upload --album-name "$FUJI_IMMICH_ALBUM" "$@"
+	else
+		"$IMMICH_BIN" upload "$@"
+	fi
+	rc=$?
+	if [ $rc -ne 0 ]; then
+		log "upload failed ($rc); $(basename "$list") stays queued"
+		failed=$((failed + $#))
+		continue
+	fi
+
+	if [ "${FUJI_KEEP_FILES:-0}" != 1 ]; then
+		for f in "$@"; do
+			archive_file "$f" || log "could not archive $f"
+		done
+	fi
+	uploaded=$((uploaded + $#))
+	rm -f "$list"
+done
+
+log "done: $uploaded uploaded, $failed queued for retry"
+[ $failed -eq 0 ]

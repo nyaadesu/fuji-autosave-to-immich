@@ -1,0 +1,33 @@
+#!/sbin/openrc-run
+# /etc/init.d/fuji-autosave
+
+description="FUJIFILM PC AutoSave receiver"
+
+: "${FUJI_USER:=fuji}"
+: "${FUJI_INBOX:=/srv/fuji-inbox}"
+: "${FUJI_STATE_DIR:=/var/lib/fuji-autosave}"
+: "${FUJI_CLIENT_NAME:=fuji-inbox}"
+: "${FUJI_HOOK=/usr/local/lib/fuji-autosave/immich-hook}"
+
+supervisor=supervise-daemon
+command=/usr/local/bin/fuji-autosave-receiver
+command_args="--inbox $FUJI_INBOX --state-dir $FUJI_STATE_DIR --name $FUJI_CLIENT_NAME ${FUJI_HOOK:+--hook $FUJI_HOOK} $FUJI_EXTRA_ARGS"
+command_user="$FUJI_USER:$FUJI_USER"
+respawn_delay=10
+respawn_max=0
+output_logger="logger -t fuji-autosave -p daemon.info"
+error_logger="logger -t fuji-autosave -p daemon.info"
+# A running Immich upload is allowed to finish on stop
+retry="TERM/300/KILL/5"
+supervise_daemon_args="--env FUJI_ENV_FILE=/etc/fuji-autosave/env --env HOME=$FUJI_STATE_DIR --env IMMICH_CONFIG_DIR=$FUJI_STATE_DIR/immich"
+
+depend() {
+	need net localmount
+	after firewall
+	use logger
+}
+
+start_pre() {
+	checkpath -d -m 0750 -o "$FUJI_USER:$FUJI_USER" "$FUJI_STATE_DIR"
+	checkpath -d -m 0755 -o "$FUJI_USER:$FUJI_USER" "$FUJI_INBOX"
+}
