@@ -12,7 +12,7 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VCAM_REV=c25376ed6f7b19a2dd430897f8008837f5e1962c
 WORK=$ROOT/build/e2e
-RECV=$ROOT/build/fuji-autosave-receiver
+RECV=${RECV:-$ROOT/build/fuji-autosave-receiver}
 
 if [ "${1:-}" != --in-netns ]; then
 	[ -x "$RECV" ] || { echo "build the receiver first (cmake --build build)" >&2; exit 1; }

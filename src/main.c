@@ -236,6 +236,23 @@ static int sink_add(void *arg, void *buf, unsigned int len, unsigned int offset,
 	return 0;
 }
 
+// ptp_close() frees the runtime and its data buffer but not the Fuji priv
+// struct, the prop table, the mutex or the TCP backend state; free those too
+static void free_runtime(struct PtpRuntime *r) {
+	void *comm = r->comm_priv;
+	void *avail = r->avail;
+	pthread_mutex_t *mutex = r->mutex;
+	free(r->priv);
+	r->priv = NULL;
+	ptp_close(r);
+	free(comm);
+	free(avail);
+	if (mutex != NULL) {
+		pthread_mutex_destroy(mutex);
+		free(mutex);
+	}
+}
+
 // Session
 
 static int batch_open(struct Batch *b) {
@@ -451,9 +468,7 @@ static int run_session(struct DiscoverInfo *info, struct SeenStore *seen) {
 		ptp_report_error(r, NULL, 0);
 	}
 	run_hook(&batch, info);
-	free(r->priv);
-	r->priv = NULL;
-	ptp_close(r);
+	free_runtime(r);
 	return rc;
 }
 
@@ -542,9 +557,7 @@ int main(int argc, char **argv) {
 		struct PtpRuntime *dr = fuji_ptp_new(PTP_IP_USB);
 		struct DiscoverInfo info;
 		int rc = fuji_discover_thread(dr, &info, cfg.client_name);
-		free(dr->priv);
-		dr->priv = NULL;
-		ptp_close(dr);
+		free_runtime(dr);
 
 		if (rc == FUJI_D_CANCELED || g_stop) break;
 		if (rc == FUJI_D_REGISTERED) {

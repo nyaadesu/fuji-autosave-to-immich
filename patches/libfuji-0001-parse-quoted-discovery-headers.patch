@@ -1,8 +1,8 @@
 diff --git a/lib/discovery.c b/lib/discovery.c
-index 17d1fe9..e997dbd 100644
+index 17d1fe9..7609c06 100644
 --- a/lib/discovery.c
 +++ b/lib/discovery.c
-@@ -221,20 +221,21 @@ static int start_invite_server(struct DiscoveryState *s, struct DiscoverInfo *in
+@@ -221,20 +221,25 @@ static int start_invite_server(struct DiscoveryState *s, struct DiscoverInfo *in
  	}
  	buffer[rc] = '\0';
  
@@ -24,6 +24,10 @@ index 17d1fe9..e997dbd 100644
 +		char *value = strchr(line, ':');
 +		if (value == NULL) continue;
 +		*value++ = '\0';
++		// Tolerate spaces around the key, as the old space-splitting parser did
++		while (*line == ' ') line++;
++		size_t key_len = strlen(line);
++		while (key_len > 0 && line[key_len - 1] == ' ') line[--key_len] = '\0';
 +		while (*value == ' ' || *value == '"') value++;
 +		size_t len = strlen(value);
 +		while (len > 0 && (value[len - 1] == ' ' || value[len - 1] == '"')) value[--len] = '\0';
