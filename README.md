@@ -18,7 +18,12 @@ specific to that body.
 | PTP/IP session, RAF/JPG download, skip repeats, hook | Tested against vcam (`tests/e2e-vcam.sh`) |
 | Immich upload hook | Tested with a stub CLI (`tests/test-hook.sh`) |
 | Alpine 3.24 (musl, busybox) | All of the above pass (`tests/alpine-rootless.sh`) |
-| A real X-T30 II | **Not tested yet.** Do Phase 0 below first. |
+| A real X-T30 II (firmware 2.06) | Works: registered, then a 38-file RAW+JPEG batch (991 MB) arrived intact at ~1.9 MB/s |
+
+On the X-T30 II, the camera offers only images it hasn't AutoSaved yet, and
+the transfer leaves the originals on the card. Starting a transfer is a manual
+step (Playback menu → PC AUTO SAVE); the camera's automatic power-off transfer
+only goes to the smartphone app.
 
 ## How it works
 
