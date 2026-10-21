@@ -136,7 +136,9 @@ a rootless chroot, so it needs no Docker.
 - libfuji has no tagged release. This repo pins commit `abe5531` as a
   submodule, and `scripts/fetch-deps.sh` applies the fixes in `patches/`
   (currently: parse discovery headers whole, so a quoted model with a space,
-  `DSCMODEL:"X-T30 II"`, is not cut to `"X-T30`).
+  `DSCMODEL:"X-T30 II"`, is not cut to `"X-T30`). Submitted upstream as
+  [petabyt/libfuji#8](https://github.com/petabyt/libfuji/pull/8); once it is
+  merged, bump the submodule and delete the patch.
 
 ## Ideas
 
