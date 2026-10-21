@@ -20,8 +20,11 @@ specific to that body.
 | Alpine 3.24 (musl, busybox) | All of the above pass (`tests/alpine-rootless.sh`) |
 | A real X-T30 II (firmware 2.06) | Works: registered, then a 38-file RAW+JPEG batch (991 MB) arrived intact at ~1.9 MB/s |
 
-On the X-T30 II, the camera offers only images it hasn't AutoSaved yet, and
-the transfer leaves the originals on the card. Starting a transfer is a manual
+On the X-T30 II, the camera offers the images it considers not yet AutoSaved,
+and the transfer leaves the originals on the card. The camera does not mark
+images as saved after a transfer to this receiver (Fuji's own software likely
+does this via property 0xD228, whose format is unknown), so the same images are
+offered again each time; `seen.tsv` skips them without downloading. Starting a transfer is a manual
 step (Playback menu → PC AUTO SAVE); the camera's automatic power-off transfer
 only goes to the smartphone app.
 
