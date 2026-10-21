@@ -1,7 +1,8 @@
-# fuji-autosave-receiver
+# fuji-autosave-to-immich
 
-A headless FUJIFILM **PC AutoSave** target for Linux, built on
-[libfuji](https://github.com/petabyt/libfuji). The camera joins your Wi-Fi,
+Wireless RAW from a Fujifilm camera into Immich. The daemon,
+`fuji-autosave-receiver`, is a headless FUJIFILM **PC AutoSave** target for
+Linux, built on [libfuji](https://github.com/petabyt/libfuji). The camera joins your Wi-Fi,
 finds this daemon instead of Fuji's Windows/macOS app, and pushes its new
 pictures. Each file lands in `<inbox>/YYYY-MM-DD/`, and a hook uploads the
 batch to Immich. You don't need a PC, a phone or a cable.
@@ -43,7 +44,7 @@ already finished are kept, and the next AutoSave picks up the rest.
 ## Build
 
 ```sh
-git clone <this repo> && cd fuji-autosave-receiver
+git clone https://github.com/nyaadesu/fuji-autosave-to-immich && cd fuji-autosave-to-immich
 scripts/fetch-deps.sh               # libfuji + libpict (rewrites their SSH URL to HTTPS)
 cmake -G Ninja -B build && cmake --build build
 sudo cmake --install build --prefix /usr/local

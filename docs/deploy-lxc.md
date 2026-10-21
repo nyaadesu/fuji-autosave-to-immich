@@ -48,7 +48,7 @@ npm install -g @immich/cli        # flags checked against 3.3.4
 
 addgroup -S fuji && adduser -S -D -H -h /var/lib/fuji-autosave -s /sbin/nologin -G fuji fuji
 
-git clone <this repo> /opt/fuji-autosave-receiver && cd /opt/fuji-autosave-receiver
+git clone https://github.com/nyaadesu/fuji-autosave-to-immich /opt/fuji-autosave-to-immich && cd /opt/fuji-autosave-to-immich
 scripts/fetch-deps.sh
 cmake -G Ninja -B build && cmake --build build
 cmake --install build --prefix /usr/local
