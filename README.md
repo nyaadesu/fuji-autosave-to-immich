@@ -134,3 +134,35 @@ a rootless chroot, so it needs no Docker.
   they must share a LAN segment with no NAT in between.
 - libfuji has no tagged release. This repo pins commit `abe5531` as a
   submodule.
+
+## Ideas
+
+### Tell the camera which images are done
+
+The camera keeps re-offering every image it thinks hasn't been AutoSaved
+(see Status), because this receiver never tells it a transfer finished. Fuji's
+own PC AutoSave app presumably does. Capturing that "done" signal and sending
+it ourselves would make each session list only new images.
+
+How to find it:
+
+1. Run Fuji's official PC AutoSave on a Windows PC and register the camera there.
+2. Capture one transfer of 2–3 images with Wireshark on that PC (or on a mirror
+   port). libfuji ships a dissector for Fuji's PTP/IP in
+   `third_party/libfuji/docs/wireshark_dissector.lua`.
+3. Look for `SetDevicePropValue` calls during and after the downloads. The
+   prime suspect is `0xD228`, which libfuji names `AutoSaveDatabaseStatus`
+   (`lib/fujiptp.h`, with a partial `struct FujiD228`; `_fuji_d228()` in
+   `lib/jank.c` holds a guessed payload). Also watch `AutoSaveVersion`
+   (`0xDF23`). Note whether they are sent per image or once at the end.
+4. Run AutoSave again with the official app and check that the camera now
+   offers 0 images. That confirms the signal is the right one.
+
+Then send the same property from `run_session()` in `src/main.c`, after each
+file is safely renamed into the inbox (or once at the end, matching what the
+official app does). The `seen.tsv` skip should stay either way, as a safety net.
+
+### Smaller things
+
+- The registration log shows the camera model cut off (`"X-T30`): libfuji
+  splits the `DSCMODEL` header on spaces, and the camera sends it quoted.
