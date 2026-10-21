@@ -33,6 +33,7 @@ if [ "${1:-}" = --inside ]; then
 		sh -n packaging/fuji-autosave.initd
 		echo "flock is $(readlink -f "$(command -v flock)")"
 		tests/test-hook.sh
+		E2E_NO_UNSHARE=1 tests/test-register.sh
 		E2E_NO_UNSHARE=1 tests/e2e-vcam.sh
 	'
 fi

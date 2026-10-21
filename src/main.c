@@ -123,8 +123,12 @@ void app_print(struct PtpRuntime *r, char *fmt, ...) {
 
 void tester_log(struct PtpRuntime *r, char *fmt, ...) { (void)r; (void)fmt; }
 void tester_fail(struct PtpRuntime *r, char *fmt, ...) { (void)r; (void)fmt; }
+// Model name from the PTP/IP init response, e.g. "X-T30 II"
+static char g_session_model[64];
+
 void app_send_cam_name(struct PtpRuntime *r, const char *name) {
 	(void)r;
+	snprintf(g_session_model, sizeof(g_session_model), "%s", name);
 	log_info("camera identifies as '%s'", name);
 }
 void app_update_storage_info(struct PtpRuntime *r) { (void)r; }
@@ -277,7 +281,8 @@ static void run_hook(struct Batch *b, const struct DiscoverInfo *info) {
 		setenv("FUJI_INBOX", cfg.inbox, 1);
 		setenv("FUJI_STATE_DIR", cfg.state_dir, 1);
 		setenv("FUJI_CAMERA_NAME", info->camera_name, 1);
-		setenv("FUJI_CAMERA_MODEL", info->camera_model, 1);
+		// The connect handshake carries no model; the session's init response does
+		setenv("FUJI_CAMERA_MODEL", info->camera_model[0] ? info->camera_model : g_session_model, 1);
 		signal(SIGPIPE, SIG_DFL);
 		execl(cfg.hook, cfg.hook, b->list_path, (char *)NULL);
 		fprintf(stderr, "error: exec %s: %s\n", cfg.hook, strerror(errno));
@@ -364,6 +369,7 @@ static int download_one(struct PtpRuntime *r, int handle, const struct PtpObject
 }
 
 static int run_session(struct DiscoverInfo *info, struct SeenStore *seen) {
+	g_session_model[0] = '\0';
 	struct PtpRuntime *r = fuji_ptp_new(PTP_IP_USB);
 	fujipriv_t *fuji = fuji_get(r);
 	fuji->transport = info->transport;

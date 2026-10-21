@@ -34,6 +34,7 @@ if [ "${1:-}" != --in-netns ]; then
 	cat > "$WORK/hook.sh" <<'EOF'
 #!/bin/sh
 cp "$1" "$FUJI_STATE_DIR/hook-saw.list"
+echo "$FUJI_CAMERA_MODEL" > "$FUJI_STATE_DIR/hook-saw.model"
 EOF
 	chmod +x "$WORK/hook.sh"
 
@@ -43,10 +44,12 @@ EOF
 fi
 
 ip link set lo up
-ip link add d0 type dummy
-ip addr add 192.168.1.10/24 dev d0
-ip link set d0 up
-ip route add default dev d0
+if ! ip link show d0 >/dev/null 2>&1; then
+	ip link add d0 type dummy
+	ip addr add 192.168.1.10/24 dev d0
+	ip link set d0 up
+	ip route add default dev d0
+fi
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -75,6 +78,7 @@ for f in DSCF0001.RAF DSCF0002.RAF; do
 	cmp -s "$WORK/sd/DCIM/100_FUJI/$f" "$WORK/inbox/$day/$f" || fail "$f missing or corrupt"
 done
 [ "$(wc -l < "$WORK/state/hook-saw.list")" -eq 2 ] || fail "hook did not get both files"
+[ "$(cat "$WORK/state/hook-saw.model")" = X-T4 ] || fail "hook did not get the camera model"
 grep -q 'session done: 2 new, 0 already seen' "$WORK/recv-1.log" || fail "unexpected first session summary"
 [ -z "$(ls -A "$WORK/inbox/.incoming")" ] || fail "partial files left behind"
 

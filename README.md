@@ -111,6 +111,7 @@ client in "wireless communication" mode (not implemented here).
 
 ```sh
 tests/test-hook.sh        # immich-hook with a stub Immich CLI
+tests/test-register.sh    # registration against a scripted camera (quoted model name)
 tests/e2e-vcam.sh         # receiver vs. emulated camera, in a private network namespace
 tests/alpine-rootless.sh  # all of the above, built and run on Alpine (musl, busybox)
 ```
@@ -133,7 +134,9 @@ a rootless chroot, so it needs no Docker.
 - **Same broadcast domain.** The camera finds the receiver by UDP broadcast, so
   they must share a LAN segment with no NAT in between.
 - libfuji has no tagged release. This repo pins commit `abe5531` as a
-  submodule.
+  submodule, and `scripts/fetch-deps.sh` applies the fixes in `patches/`
+  (currently: parse discovery headers whole, so a quoted model with a space,
+  `DSCMODEL:"X-T30 II"`, is not cut to `"X-T30`).
 
 ## Ideas
 
@@ -161,8 +164,3 @@ How to find it:
 Then send the same property from `run_session()` in `src/main.c`, after each
 file is safely renamed into the inbox (or once at the end, matching what the
 official app does). The `seen.tsv` skip should stay either way, as a safety net.
-
-### Smaller things
-
-- The registration log shows the camera model cut off (`"X-T30`): libfuji
-  splits the `DSCMODEL` header on spaces, and the camera sends it quoted.
