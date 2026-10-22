@@ -35,6 +35,9 @@ if [ "${1:-}" != --in-netns ]; then
 #!/bin/sh
 cp "$1" "$FUJI_STATE_DIR/hook-saw.list"
 echo "$FUJI_CAMERA_MODEL" > "$FUJI_STATE_DIR/hook-saw.model"
+echo "$1" > "$FUJI_STATE_DIR/hook-saw.arg"
+# A long-running hook must not hold the receiver's sockets
+ls -l /proc/$$/fd > "$FUJI_STATE_DIR/hook-saw.fds"
 EOF
 	chmod +x "$WORK/hook.sh"
 
@@ -69,7 +72,12 @@ session() {
 	sleep 1 # let the hook finish
 }
 
+# A batch list a crashed receiver left unfinished is queued at startup
+mkdir -p "$WORK/state/batches"
+echo /nonexistent > "$WORK/state/batches/crashed.list.part"
 session 1
+[ -f "$WORK/state/batches/crashed.list" ] || fail "unfinished batch list not recovered"
+rm -f "$WORK/state/batches/crashed.list"
 # vcam counts its DCIM folders as objects but reports one fewer than it has,
 # so the last file in its tree is never offered; expect the first two files.
 year=$(ls "$WORK/inbox" | grep -E '^[0-9]{4}$')
@@ -83,6 +91,15 @@ done
 [ "$(cat "$WORK/state/hook-saw.model")" = X-T4 ] || fail "hook did not get the camera model"
 grep -q 'session done: 2 new, 0 already seen' "$WORK/recv-1.log" || fail "unexpected first session summary"
 [ -z "$(ls -A "$WORK/inbox/.incoming")" ] || fail "partial files left behind"
+case $(cat "$WORK/state/hook-saw.arg") in *.list) ;; *) fail "hook got $(cat "$WORK/state/hook-saw.arg"), not a .list";; esac
+[ -z "$(ls "$WORK/state/batches" | grep '\.part$')" ] || fail "batch list left as .part"
+! grep -q 'socket:' "$WORK/state/hook-saw.fds" || fail "hook inherited sockets: $(grep socket: "$WORK/state/hook-saw.fds")"
+# mtime is the capture time the camera reported (seen.tsv keeps it)
+for f in DSCF0001.RAF DSCF0002.RAF; do
+	want=$(grep "^$f|" "$WORK/state/seen.tsv" | cut -d'|' -f2)
+	got=$(date -r "$WORK/inbox/$day/$f" +%Y%m%dT%H%M%S)
+	[ "$got" = "$want" ] || fail "$f mtime $got, capture time $want"
+done
 
 rm -f "$WORK/state/hook-saw.list"
 session 2

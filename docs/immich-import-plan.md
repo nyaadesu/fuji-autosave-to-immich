@@ -142,8 +142,15 @@ How the implementation maps onto the plan:
   library** on every run (tag missing, stack unstacked pairs, add missing RAFs
   to the album), so files from timed-out or failed runs are caught up
   automatically. A batch list stays queued until all its files were found.
+- Each file's mtime is the capture time the camera reports. "Already at the
+  destination" means same size **and** same mtime, because size alone doesn't
+  tell shots apart (uncompressed RAFs are all one size, and `DSCF0001` repeats
+  after a counter reset, a second card or a rollover). Such a reused name is
+  saved as `DSCF0001-1.RAF`.
 - Pairs are files with the same folder and stem (case-insensitive), exactly
-  one `.JPG`/`.JPEG` and one `.RAF`. In `RAW_MODE=archive` only paired RAFs
+  one `.JPG`/`.JPEG` and one `.RAF`, whose mtimes are within 2 s of each other.
+  This stops two different shots from being stacked when only one of them got
+  a `-1` name. In `RAW_MODE=archive` only paired RAFs
   are archived, so a RAW-only shot stays visible in the timeline.
 - The tag is not hardcoded: each asset gets `CAMERA_TAG_PREFIX` (default
   `Camera/`) + its camera model. The model is Immich's EXIF `Model` for the

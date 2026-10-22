@@ -61,7 +61,7 @@ export PHOTO_ROOT_CONTAINER=/mnt/fuji SCAN_TIMEOUT=20
 cat > "$T/env" <<'EOF'
 RAW_ALBUM_NAME="Fuji RAW"
 CAMERA_TAG_PREFIX='Camera/'
-RAW_MODE=stack
+RAW_MODE=stack # or archive; an unquoted " #" starts a comment, as in sh
 LIBRARY_ID=from-env-file-must-not-win
 EOF
 export FUJI_ENV_FILE="$T/env"
@@ -73,7 +73,8 @@ M=/mnt/fuji
 setup
 batch b1 $D1/DSCF0001.JPG $D1/DSCF0001.RAF $D1/DSCF0002.RAF $D1/DSCF0003.JPG
 hook --check || fail "--check failed"
-hook || fail "first run failed"
+# As the receiver runs it: with this session's batch list
+hook "$T/state/batches/b1.list" || fail "first run failed"
 [ ! -e "$T/state/batches/b1.list" ] || fail "batch list not removed"
 [ "$(state 'len(s["tags"]["Camera/X-T30 II"])')" = 4 ] || fail "not every file tagged"
 [ "$(state 's["stacks"]')" = "[['$M/$D1/DSCF0001.JPG', '$M/$D1/DSCF0001.RAF']]" ] || fail "pair not stacked JPEG-first: $(state 's["stacks"]')"
@@ -129,12 +130,24 @@ FUJI_CAMERA_MODEL= hook || fail "run without a session model failed"
 [ "$(state 'sum(len(v) for v in s["tags"].values())')" = 1 ] || fail "file without a model got tagged"
 grep -q '1 asset(s) not tagged yet' "$T/hook.log" || fail "untagged file not reported"
 batch b7 $D1/DSCF0031.JPG
-hook || fail "run with a session model failed"
+hook "$T/state/batches/b7.list" || fail "run with a session model failed"
 [ "$(state 's["tags"]["Camera/X-T30 II"]')" = "['$M/$D1/DSCF0031.JPG']" ] || fail "session model not used: $(state 's["tags"]')"
 [ "$(state 'len(s["tags"]["Camera/X-H2"])')" = 1 ] || fail "EXIF-tagged file retagged"
 
 # 7. A fixed CAMERA_TAG overrides the per-camera tags
 CAMERA_TAG=Fuji hook || fail "fixed tag run failed"
 [ "$(state 'len(s["tags"]["Fuji"])')" = 2 ] || fail "fixed CAMERA_TAG not applied"
+
+# 8. A reused file name is not a pair: the receiver stamps the capture time as
+#    mtime, and a JPEG and RAF minutes apart are different shots. The session
+#    model is not applied to files outside this session's batch list.
+setup
+batch b8 $D2/DSCF0040.JPG $D2/DSCF0040.RAF
+python3 -c 'import os, sys; os.utime(sys.argv[1], (1e9, 1e9))' "$T/lib/$D2/DSCF0040.RAF"
+batch b9 $D2/DSCF0041.JPG
+hook "$T/state/batches/b9.list" || fail "mismatched pair run failed"
+[ "$(state 'len(s["stacks"])')" = 0 ] || fail "different shots stacked"
+grep -q "not pairing $M/$D2/DSCF0040.JPG" "$T/hook.log" || fail "refused pair not logged"
+[ "$(state 's["tags"]["Camera/X-T30 II"]')" = "['$M/$D2/DSCF0041.JPG']" ] || fail "session model applied outside its batch: $(state 's["tags"]')"
 
 echo "immich-hook: all checks passed"

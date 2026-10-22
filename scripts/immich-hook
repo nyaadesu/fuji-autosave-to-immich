@@ -80,6 +80,9 @@ def load_env_file(path):
             value = value.strip()
             if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                 value = value[1:-1]
+            elif " #" in value:
+                # As in sh: an unquoted " #" starts a comment
+                value = value.split(" #", 1)[0].rstrip()
             os.environ.setdefault(key, value)
 
 
@@ -104,7 +107,8 @@ def config():
         "api": url + "/api",
         "key": env["IMMICH_API_KEY"],
         "library": env["LIBRARY_ID"],
-        "host_root": os.path.normpath(host_root),
+        # The receiver writes resolved paths into batch lists
+        "host_root": os.path.realpath(host_root),
         "container_root": posixpath.normpath(env["PHOTO_ROOT_CONTAINER"]),
         "album": env.get("RAW_ALBUM_NAME") or "Fuji RAW",
         "tag": env.get("CAMERA_TAG") or None,
@@ -172,24 +176,43 @@ def pair_key(path):
 
 # Pending batches
 
+def read_list(cfg, list_path):
+    """Container paths of the files in a batch list that still exist."""
+    paths = []
+    prefix = cfg["host_root"] + os.sep
+    with open(list_path) as f:
+        for line in f:
+            p = os.path.normpath(line.rstrip("\n")) if line.strip() else None
+            if p is None or not os.path.isfile(p):
+                continue
+            if not p.startswith(prefix):
+                log(f"{p} is outside PHOTO_ROOT_HOST {cfg['host_root']}, ignoring")
+                continue
+            rel = p[len(prefix):].replace(os.sep, "/")
+            paths.append(posixpath.join(cfg["container_root"], rel))
+    return paths
+
+
 def load_batches(cfg):
     """{list path: [container paths]} for queued batch lists, minus vanished files."""
-    batches = {}
-    prefix = cfg["host_root"] + os.sep
-    for list_path in sorted(glob.glob(os.path.join(cfg["state_dir"], "batches", "*.list"))):
-        paths = []
-        with open(list_path) as f:
-            for line in f:
-                p = os.path.normpath(line.rstrip("\n")) if line.strip() else None
-                if p is None or not os.path.isfile(p):
-                    continue
-                if not p.startswith(prefix):
-                    log(f"{p} is outside PHOTO_ROOT_HOST {cfg['host_root']}, ignoring")
-                    continue
-                rel = p[len(prefix):].replace(os.sep, "/")
-                paths.append(posixpath.join(cfg["container_root"], rel))
-        batches[list_path] = paths
-    return batches
+    return {p: read_list(cfg, p)
+            for p in sorted(glob.glob(os.path.join(cfg["state_dir"], "batches", "*.list")))}
+
+
+def host_path(cfg, container_path):
+    rel = container_path[len(cfg["container_root"]) + 1:]
+    return os.path.join(cfg["host_root"], *rel.split("/"))
+
+
+def same_shot(cfg, jpg, raf):
+    """JPEG and RAF of one shot share the capture time the receiver stamps as
+    mtime; a reused file name (counter reset, second card) does not."""
+    try:
+        a = os.stat(host_path(cfg, jpg["originalPath"])).st_mtime
+        b = os.stat(host_path(cfg, raf["originalPath"])).st_mtime
+    except OSError:
+        return True  # can't tell from here; trust the name
+    return abs(a - b) <= 2
 
 
 def wait_for_assets(immich, cfg, wanted):
@@ -215,7 +238,7 @@ def wait_for_assets(immich, cfg, wanted):
 
 # Reconcile the whole library
 
-def tag_assets(immich, cfg, assets, new_paths):
+def tag_assets(immich, cfg, assets, session_paths):
     """Tag every untagged asset with its camera; return (newly tagged, model unknown)."""
     lib = cfg["library"]
     if cfg["tag"]:
@@ -239,7 +262,9 @@ def tag_assets(immich, cfg, assets, new_paths):
         models = {a["id"]: ((a.get("exifInfo") or {}).get("model") or "").strip()
                   for a in immich.search(libraryId=lib, withExif=True)}
         for a in todo:
-            model = models.get(a["id"]) or (cfg["session_model"] if a["originalPath"] in new_paths else "")
+            # The session's model only describes this session's files, not
+            # older queued batches (which may come from another body)
+            model = models.get(a["id"]) or (cfg["session_model"] if a["originalPath"] in session_paths else "")
             if not model:
                 unknown += 1
                 continue
@@ -276,7 +301,7 @@ def add_all(immich, path, ids):
     return added
 
 
-def reconcile(immich, cfg, new_paths):
+def reconcile(immich, cfg, new_paths, session_paths):
     root = cfg["container_root"] + "/"
     assets = [a for a in immich.search(libraryId=cfg["library"])
               if a["originalPath"].startswith(root) and not a.get("isOffline")]
@@ -284,7 +309,7 @@ def reconcile(immich, cfg, new_paths):
     stats = {"assets": len(assets)}
 
     # Tag every asset with the camera it came from
-    stats["tagged"], unknown = tag_assets(immich, cfg, assets, new_paths)
+    stats["tagged"], unknown = tag_assets(immich, cfg, assets, session_paths)
     if unknown:
         log(f"{unknown} asset(s) not tagged yet: Immich has no camera model for them; a later run will")
 
@@ -297,7 +322,11 @@ def reconcile(immich, cfg, new_paths):
     pairs = []
     for g in groups.values():
         if len(g.get("jpeg", [])) == 1 and len(g.get("raw", [])) == 1:
-            pairs.append((g["jpeg"][0], g["raw"][0]))
+            jpg, raf = g["jpeg"][0], g["raw"][0]
+            if same_shot(cfg, jpg, raf):
+                pairs.append((jpg, raf))
+            elif jpg["originalPath"] in new_paths or raf["originalPath"] in new_paths:
+                log(f"not pairing {jpg['originalPath']} with {raf['originalPath']}: capture times differ")
 
     stats["stacked"] = stats["archived"] = 0
     if cfg["mode"] == "stack":
@@ -348,6 +377,13 @@ def run(cfg):
 
     batches = load_batches(cfg)
     wanted = sorted({p for paths in batches.values() for p in paths})
+    # The batch list the receiver started this run for (absent when run by hand)
+    this_list = sys.argv[1] if len(sys.argv) > 1 else None
+    session_paths = set()
+    if this_list:
+        for list_path, paths in batches.items():
+            if os.path.realpath(list_path) == os.path.realpath(this_list):
+                session_paths = set(paths)
     for list_path, paths in batches.items():
         if not paths:
             os.unlink(list_path)
@@ -358,7 +394,7 @@ def run(cfg):
     for p in sorted(missing):
         log(f"not in Immich yet: {p}")
 
-    stats = reconcile(immich, cfg, set(wanted) - missing)
+    stats = reconcile(immich, cfg, set(wanted) - missing, session_paths)
 
     for list_path, paths in batches.items():
         if paths and not missing.intersection(paths):

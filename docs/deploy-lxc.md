@@ -145,3 +145,25 @@ RAF. If the album doesn't show the stacked RAF properly, set `RAW_MODE=archive`
 in `/etc/fuji-autosave/env`. Paired RAFs are then archived instead of stacked:
 they are hidden from the timeline but still appear in the album and in search.
 Unstack the test pair by hand and rerun the hook.
+
+## Things to know
+
+- **Immich's "Sidecar" job fails for every tagged asset. That is expected.**
+  Each tag added through the API makes Immich (v3.3.5) try to write the tags
+  into `<file>.xmp`, which for a RAF is darktable's `DSCF1234.RAF.xmp`. The
+  read-only mount stops it, and that is what keeps darktable's sidecars safe.
+  **Never mount the library read-write into Immich.**
+- **darktable/Lightroom keywords don't show up as Immich tags.** A tag added
+  through the API locks the asset's tag list in Immich, so keywords that
+  darktable writes into the sidecar later are ignored. Ratings and descriptions
+  are not affected by this.
+- **Lightroom Classic** names RAW sidecars `DSCF1234.xmp`. Immich also treats that
+  file as the sidecar of `DSCF1234.JPG`, so Lightroom's rating and keywords show up on the
+  JPEG. darktable's `DSCF1234.RAF.xmp` only applies to the RAF.
+- **File times.** The receiver sets each file's mtime to the capture time the
+  camera reports. The camera has no time zone setting for this, so the mtime is
+  interpreted in the container's time zone (Alpine LXC: UTC unless
+  `/etc/localtime` is set). Immich takes dates from EXIF, so this only affects
+  `ls`. The hook pairs a JPEG and RAF only if their mtimes are within 2 s, so
+  if you copy files into the library by hand, keep their times (`cp -p`,
+  `rsync -t`).

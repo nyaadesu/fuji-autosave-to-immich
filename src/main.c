@@ -1,6 +1,7 @@
 // fuji-autosave-receiver: a headless FUJIFILM PC AutoSave target built on libfuji.
 // Waits for the camera's AutoSave broadcast, pulls every new object over PTP/IP
 // into <inbox>/YYYY/YYYY-MM-DD/, and runs a hook once per batch.
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -36,6 +37,7 @@ struct Config {
 struct Batch {
 	FILE *list;
 	char list_path[PATH_MAX];
+	char part_path[PATH_MAX];
 	int count;
 };
 
@@ -200,14 +202,31 @@ static void day_dir_from_ptp_date(const char *date, char out[DAY_DIR_LEN]) {
 	strftime(out, DAY_DIR_LEN, "%Y/%Y-%m-%d", &tm);
 }
 
-// 1 if the object's final path already holds a file of its size (e.g. the
-// seen list was lost); the inbox is never rewritten once Immich has indexed it
+// Capture time from a PTP date "YYYYMMDDThhmmss" (camera local time); 0 if malformed
+static int capture_time(const char *date, time_t *out) {
+	struct tm tm = {0};
+	if (strlen(date) < 15 || date[8] != 'T'
+			|| sscanf(date, "%4d%2d%2dT%2d%2d%2d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday,
+				&tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) return 0;
+	tm.tm_year -= 1900;
+	tm.tm_mon -= 1;
+	tm.tm_isdst = -1;
+	*out = mktime(&tm);
+	return *out != (time_t)-1;
+}
+
+// 1 if the object's final path already holds this shot (e.g. the seen list
+// was lost): same size and, when the camera reports one, the capture time we
+// stamp as mtime. Size alone is not enough: uncompressed RAFs are all the same
+// size, and DSCF0001 repeats after a counter reset or rollover.
 static int already_in_inbox(const struct PtpObjectInfo *oi, const char *name) {
 	char day[DAY_DIR_LEN], path[PATH_MAX];
 	day_dir_from_ptp_date(oi->date_created, day);
 	if (snprintf(path, sizeof(path), "%s/%s/%s", cfg.inbox, day, name) >= (int)sizeof(path)) return 0;
 	struct stat st;
-	return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == (off_t)oi->compressed_size;
+	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != (off_t)oi->compressed_size) return 0;
+	time_t t;
+	return !capture_time(oi->date_created, &t) || st.st_mtime == t;
 }
 
 // Pick <dir>/<name>, or <dir>/<stem>-N<ext> if that is taken
@@ -268,9 +287,30 @@ static int batch_open(struct Batch *b) {
 	char stamp[32];
 	strftime(stamp, sizeof(stamp), "%Y%m%dT%H%M%S", &tm);
 	if (snprintf(b->list_path, sizeof(b->list_path), "%s/%s-%d.list", dir, stamp, (int)getpid()) >= (int)sizeof(b->list_path)) return -1;
-	b->list = fopen(b->list_path, "w");
+	// Written as .list.part and renamed when the session ends, so a hook that
+	// is already running never picks up (and retires) a half-written list
+	if (snprintf(b->part_path, sizeof(b->part_path), "%s.part", b->list_path) >= (int)sizeof(b->part_path)) return -1;
+	b->list = fopen(b->part_path, "w");
 	b->count = 0;
 	return b->list == NULL ? -1 : 0;
+}
+
+// Lists left as .list.part by a crash: their files were saved, so queue them
+static void recover_batches(void) {
+	char dir[PATH_MAX];
+	if (snprintf(dir, sizeof(dir), "%s/batches", cfg.state_dir) >= (int)sizeof(dir)) return;
+	DIR *d = opendir(dir);
+	if (d == NULL) return;
+	struct dirent *e;
+	while ((e = readdir(d)) != NULL) {
+		size_t len = strlen(e->d_name);
+		if (len <= 10 || strcmp(e->d_name + len - 10, ".list.part") != 0) continue;
+		char from[PATH_MAX], to[PATH_MAX];
+		if (snprintf(from, sizeof(from), "%s/%s", dir, e->d_name) >= (int)sizeof(from)) continue;
+		snprintf(to, sizeof(to), "%.*s", (int)strlen(from) - 5, from);
+		if (rename(from, to) == 0) log_info("queued unfinished batch list %s", to);
+	}
+	closedir(d);
 }
 
 static void run_hook(struct Batch *b, const struct DiscoverInfo *info) {
@@ -278,13 +318,13 @@ static void run_hook(struct Batch *b, const struct DiscoverInfo *info) {
 	fclose(b->list);
 	b->list = NULL;
 
-	if (b->count == 0) {
-		unlink(b->list_path);
+	if (b->count == 0 || cfg.hook == NULL) {
+		// Nothing consumes batch lists without a hook
+		unlink(b->part_path);
 		return;
 	}
-	if (cfg.hook == NULL) {
-		// Nothing consumes batch lists without a hook
-		unlink(b->list_path);
+	if (rename(b->part_path, b->list_path)) {
+		log_err("rename %s: %s", b->part_path, strerror(errno));
 		return;
 	}
 
@@ -351,6 +391,13 @@ static int download_one(struct PtpRuntime *r, int handle, const struct PtpObject
 	if (rc == 0 && sink.written != oi->compressed_size) {
 		log_err("%s: got %u of %u bytes", name, sink.written, oi->compressed_size);
 		rc = PTP_RUNTIME_ERR;
+	}
+	// mtime = capture time: lets already_in_inbox() and the hook's pairing
+	// tell shots with the same file name apart
+	time_t shot;
+	if (rc == 0 && capture_time(oi->date_created, &shot)) {
+		struct timespec ts[2] = {{0, UTIME_OMIT}, {shot, 0}};
+		if (futimens(sink.fd, ts)) log_err("%s: cannot set mtime: %s", name, strerror(errno));
 	}
 	if (rc == 0 && fsync(sink.fd)) rc = -1;
 	if (close(sink.fd)) rc = -1;
@@ -557,6 +604,7 @@ int main(int argc, char **argv) {
 	}
 	cfg.inbox = inbox_abs;
 	cfg.state_dir = state_abs;
+	if (!cfg.list_only) recover_batches();
 
 	char seen_path[PATH_MAX];
 	struct SeenStore seen;
