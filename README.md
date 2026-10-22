@@ -51,10 +51,16 @@ only goes to the smartphone app.
    `scripts/immich-hook` asks Immich to scan the library and waits until every
    new file has an asset. It then tags each asset `Camera/<model>` (the model the camera reports, or the EXIF Model), stacks each
    `DSCFnnnn.JPG` + `DSCFnnnn.RAF` pair (JPEG on top; or archives the RAF with
-   `RAW_MODE=archive`) and adds every RAF to the `RAW_ALBUM_NAME` album. Steps
-   that already happened are skipped, and the hook works over the whole library, so a
-   batch that timed out or hit an Immich outage stays queued and is caught up
-   by the next run.
+   `RAW_MODE=archive`) and adds every RAF to the `RAW_ALBUM_NAME` album. Each
+   step happens once per file, so what you change in Immich afterwards (unstack,
+   remove from the album, untag) stays that way. The hook works over the whole
+   library, so a batch that timed out or hit an Immich outage stays queued and
+   is caught up by the next run.
+6. A photo you delete in Immich for good (after its trash) would come back with
+   the next scan, because Immich can't delete files from the read-only library.
+   Before scanning, the hook therefore deletes such files itself, with their
+   darktable `.xmp`. It has safety stops against mass deletion, and
+   `DELETE_REMOVED=0` turns it off.
 
 If a download fails partway through, the daemon drops the session. A half-read
 object leaves Fuji cameras unresponsive (see libfuji `lib/jank.c`). Files that

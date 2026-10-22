@@ -464,7 +464,18 @@ static int run_session(struct DiscoverInfo *info, struct SeenStore *seen) {
 	// The camera needs a moment after the invite before it accepts PTP/IP
 	usleep(1000 * 1000);
 	log_info("connecting to %s:%d", info->camera_ip, info->camera_port);
-	rc = ptpip_connect(r, info->camera_ip, info->camera_port, 3);
+	// The camera sometimes needs longer than one attempt after its invite (seen
+	// on an X-T30 II), and gives up on the AutoSave if we do: retry, waiting
+	// longer each time (connect timeouts of 5, 7 and 10 s)
+	static const int extra_timeout[] = {3, 5, 8};
+	for (int attempt = 0; attempt < 3 && !g_stop; attempt++) {
+		if (attempt > 0) {
+			log_info("PTP/IP connect attempt %d failed; retrying", attempt);
+			usleep(1000 * 1000);
+		}
+		rc = ptpip_connect(r, info->camera_ip, info->camera_port, extra_timeout[attempt]);
+		if (rc == 0) break;
+	}
 	if (rc) {
 		log_err("PTP/IP connect to %s:%d failed (%d)", info->camera_ip, info->camera_port, rc);
 		goto out;

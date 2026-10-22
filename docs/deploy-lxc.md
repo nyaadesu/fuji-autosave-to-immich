@@ -80,8 +80,10 @@ Then, in the Immich web UI:
 1. Administration → External Libraries → Create library, **owned by your own
    user**, import path `/mnt/fuji` (the container path). Add the exclusion
    pattern `**/.incoming/**`, where the receiver keeps partial downloads.
-   You can turn off the periodic scan, because the hook triggers one after
-   every batch. Note the library ID (it is in the page URL, or list them with
+   Turn off periodic scanning of external libraries (Administration →
+   Settings → External Library). The hook triggers a scan after every batch,
+   and a scan Immich starts on its own would import a photo you deleted in
+   Immich again before the hook can delete its file. Note the library ID (it is in the page URL, or list them with
    `curl -H "x-api-key: $KEY" http://immich.lan:2283/api/libraries`).
 2. Account Settings → API Keys → New API key, as that same user, with these
    permissions: `library.read`, `library.update`, `asset.read`, `asset.update`,
@@ -150,6 +152,18 @@ they are hidden from the timeline but still appear in the album and in search.
 Unstack the test pair by hand and rerun the hook.
 
 ## Things to know
+
+- **Deleting a photo in Immich deletes the file.** After Immich empties it
+  from the trash (30 days by default, or "Delete permanently"), the hook's next
+  run deletes the file and its `.xmp` from `/data2/fuji`. A run that would
+  delete more than `DELETE_LIMIT` files fails instead and logs why. Keep ZFS
+  snapshots of `data2/fuji` (e.g. with `zfs-auto-snapshot` or sanoid on the
+  host) as the real safety net against mistakes. `DELETE_REMOVED=0` turns this
+  off.
+- **The hook's memory is `/var/lib/fuji-autosave/library.json`.** Deleting
+  that file makes the hook treat every photo as new on its next run: it tags,
+  stacks and adds them to the album again, and only deletes files it has seen
+  again since.
 
 - **Immich's "Sidecar" job fails for every tagged asset. That is expected.**
   Each tag added through the API makes Immich (v3.3.5) try to write the tags

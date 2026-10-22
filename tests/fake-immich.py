@@ -203,6 +203,45 @@ class Handler(BaseHTTPRequestHandler):
                 if "visibility" in body:
                     assets[i]["visibility"] = body["visibility"]
             return self.reply(204)
+        if method == "POST" and p == "/api/_user":
+            # Test-only: what a user does in the web UI, {"op": ..., "path": ...}
+            op, path = body["op"], body.get("path")
+            ids = [i for i, a in assets.items() if a["originalPath"] == path]
+            if op == "wipe":
+                assets.clear(); stacks.clear(); exif.clear()
+                for members in tag_assets.values():
+                    members.clear()
+                for al in albums.values():
+                    al["assets"].clear()
+            for i in ids:
+                if op == "unstack":
+                    for s in [s for s in stacks.values() if i in s["assets"]]:
+                        del stacks[s["id"]]
+                        for j in s["assets"]:
+                            assets[j]["stackId"] = None
+                elif op == "album_remove":
+                    for al in albums.values():
+                        al["assets"].discard(i)
+                elif op == "untag":
+                    for members in tag_assets.values():
+                        members.discard(i)
+                elif op == "unarchive":
+                    assets[i]["visibility"] = "timeline"
+                elif op == "trash":
+                    assets[i]["deletedAt"] = "2026-10-22T00:00:00.000Z"
+                elif op == "delete":
+                    # Permanent delete: the row goes; the read-only file stays
+                    for s in [s for s in stacks.values() if i in s["assets"]]:
+                        del stacks[s["id"]]
+                        for j in s["assets"]:
+                            if j in assets:
+                                assets[j]["stackId"] = None
+                    for members in tag_assets.values():
+                        members.discard(i)
+                    for al in albums.values():
+                        al["assets"].discard(i)
+                    del assets[i]
+            return self.reply(204)
         if method == "GET" and p == "/api/_state":
             return self.reply(200, {
                 "assets": {a["originalPath"]: a for a in assets.values()},

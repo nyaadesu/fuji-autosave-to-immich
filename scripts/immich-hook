@@ -4,18 +4,29 @@
 The receiver writes straight into the external library root
 (PHOTO_ROOT_HOST, e.g. /fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF). This hook:
 
-  1. asks Immich to scan the library,
-  2. waits until every file of the pending batches has an asset,
-  3. tags every library asset with its camera, "Camera/<model>",
-  4. stacks each JPEG+RAF pair (JPEG as cover), or with RAW_MODE=archive
+  1. deletes files whose photo was permanently deleted in Immich (see below),
+  2. asks Immich to scan the library,
+  3. waits until every file of the pending batches has an asset,
+  4. tags each asset with its camera, "Camera/<model>",
+  5. stacks each JPEG+RAF pair (JPEG as cover), or with RAW_MODE=archive
      archives the paired RAF instead,
-  5. adds every RAF to the RAW_ALBUM_NAME album,
-  6. logs a summary.
+  6. adds each RAF to the RAW_ALBUM_NAME album,
+  7. logs a summary.
 
-Steps 3-5 run over the whole library, so anything an earlier run missed
-(scan timeout, Immich down) is caught up. Everything is safe to repeat. A batch
-list stays queued in $FUJI_STATE_DIR/batches/ until all its files were found.
-Files are never moved, renamed or deleted.
+Steps 4-6 look at the whole library, so anything an earlier run missed (scan
+timeout, Immich down) is caught up, but each step is done only once per file:
+$FUJI_STATE_DIR/library.json records what was done, so unstacking a pair,
+removing a RAF from the album, untagging or unarchiving in Immich sticks.
+A batch list stays queued in $FUJI_STATE_DIR/batches/ until all its files
+were found.
+
+Deleting: Immich can't delete files of a read-only external library, so a
+photo deleted there would come back with the next scan. Once Immich has
+deleted it for good (emptied from the trash; a trashed photo is left alone),
+the hook deletes the file and its darktable sidecar (<file>.xmp). Only files
+whose asset the hook has recorded before are deleted, never more than
+DELETE_LIMIT per run or more than half the library, and nothing if Immich
+lists no assets at all; a run that would is stopped with an error instead.
 
 Settings come from the environment and from $FUJI_ENV_FILE
 (default /etc/fuji-autosave/env; see packaging/fuji-autosave.env.example):
@@ -33,6 +44,8 @@ Settings come from the environment and from $FUJI_ENV_FILE
   CAMERA_TAG            one fixed tag for every asset instead (optional)
   RAW_MODE              stack (default) or archive
   SCAN_TIMEOUT          seconds to wait for new assets (default 900)
+  DELETE_REMOVED        1 (default): delete files deleted in Immich; 0: never
+  DELETE_LIMIT          most files deleted in one run (default 50)
 
 Set by the receiver: FUJI_STATE_DIR, FUJI_INBOX, FUJI_BATCH_*, FUJI_CAMERA_*.
 Run it by hand as the service user to retry pending batches, or with --check
@@ -87,6 +100,13 @@ def load_env_file(path):
             os.environ.setdefault(key, value)
 
 
+def number(env, key, default, kind=float):
+    try:
+        return kind(env.get(key) or default)
+    except ValueError:
+        raise Fail(f"{key} must be a number, not {env[key]!r}") from None
+
+
 def config():
     load_env_file(os.environ.get("FUJI_ENV_FILE", "/etc/fuji-autosave/env"))
     env = os.environ
@@ -100,10 +120,9 @@ def config():
     mode = env.get("RAW_MODE", "stack")
     if mode not in ("stack", "archive"):
         raise Fail(f"RAW_MODE must be stack or archive, not {mode!r}")
-    try:
-        timeout = float(env.get("SCAN_TIMEOUT") or 900)
-    except ValueError:
-        raise Fail(f"SCAN_TIMEOUT must be a number of seconds, not {env['SCAN_TIMEOUT']!r}") from None
+    delete = env.get("DELETE_REMOVED", "1")
+    if delete not in ("0", "1"):
+        raise Fail(f"DELETE_REMOVED must be 0 or 1, not {delete!r}")
     return {
         "api": url + "/api",
         "key": env["IMMICH_API_KEY"],
@@ -116,7 +135,9 @@ def config():
         "tag_prefix": env.get("CAMERA_TAG_PREFIX") or "Camera/",
         "session_model": (env.get("FUJI_CAMERA_MODEL") or "").strip(),
         "mode": mode,
-        "timeout": timeout,
+        "timeout": number(env, "SCAN_TIMEOUT", 900),
+        "delete": delete == "1",
+        "delete_limit": number(env, "DELETE_LIMIT", 50, int),
         "state_dir": env.get("FUJI_STATE_DIR") or "/var/lib/fuji-autosave",
     }
 
@@ -173,6 +194,44 @@ class Immich:
             if not res.get("nextCursor"):
                 return items
             body["cursor"] = res["nextCursor"]
+
+
+class State:
+    """$FUJI_STATE_DIR/library.json: {"assets": {container path: {"id": asset id,
+    "done": [steps]}}}. A path is recorded once Immich has an asset for it. Steps
+    are "stack", "archive", and "tag:<tag or prefix*>" and "album:<name>", so a
+    changed CAMERA_TAG(_PREFIX) or RAW_ALBUM_NAME applies once to everything."""
+
+    def __init__(self, cfg):
+        self.path = os.path.join(cfg["state_dir"], "library.json")
+        try:
+            with open(self.path) as f:
+                self.assets = json.load(f)["assets"]
+        except FileNotFoundError:
+            self.assets = {}
+        except (ValueError, KeyError, TypeError) as e:
+            raise Fail(f"{self.path} is unreadable ({e}); move it away to start over") from None
+
+    def save(self):
+        tmp = self.path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"assets": self.assets}, f, indent=0, sort_keys=True)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp, self.path)
+
+    def see(self, a):
+        """Record a live asset; a new asset at a known path starts over."""
+        e = self.assets.get(a["originalPath"])
+        if e is None or e["id"] != a["id"]:
+            self.assets[a["originalPath"]] = {"id": a["id"], "done": []}
+
+    def done(self, a, step):
+        return step in self.assets[a["originalPath"]]["done"]
+
+    def mark(self, a, step):
+        if not self.done(a, step):
+            self.assets[a["originalPath"]]["done"].append(step)
 
 
 def chunks(ids):
@@ -233,6 +292,48 @@ def same_shot(cfg, jpg, raf):
     return abs(a - b) <= 2
 
 
+# Deletions
+
+def remove_deleted(immich, cfg, state):
+    """Delete the files of recorded assets that Immich no longer has; return how many."""
+    root = cfg["container_root"] + "/"
+    # Trashed, offline and locked assets count as present
+    present = {a["originalPath"]: a["id"]
+               for a in immich.assets(cfg["library"], live=False, originalPath={"startsWith": root})}
+    if state.assets and not present:
+        raise Fail(f"Immich lists no assets in the library, but {len(state.assets)} are recorded; "
+                   "not deleting anything (wrong LIBRARY_ID, or Immich was reset?)")
+    for p in [p for p in state.assets if not p.startswith(root)]:
+        del state.assets[p]  # recorded under another PHOTO_ROOT_CONTAINER
+    gone = [p for p, e in state.assets.items() if present.get(p) != e["id"]]
+    on_disk = [p for p in gone if os.path.isfile(host_path(cfg, p))]
+    for p in gone:
+        if p not in on_disk:
+            del state.assets[p]  # already gone from disk too
+    if not on_disk:
+        return 0
+    if not cfg["delete"]:
+        log(f"{len(on_disk)} file(s) deleted in Immich are still on disk and will be "
+            "imported again (DELETE_REMOVED=0)")
+        for p in on_disk:
+            del state.assets[p]
+        return 0
+    if len(on_disk) > cfg["delete_limit"] or (len(on_disk) > 10 and len(on_disk) > len(state.assets) / 2):
+        sample = ", ".join(on_disk[:5])
+        raise Fail(f"{len(on_disk)} of {len(state.assets)} recorded file(s) are no longer in Immich "
+                   f"(e.g. {sample}); not deleting that many. If they really were deleted in "
+                   "Immich, rerun once with a higher DELETE_LIMIT; or set DELETE_REMOVED=0")
+    for p in on_disk:
+        hp = host_path(cfg, p)
+        os.unlink(hp)
+        if os.path.isfile(hp + ".xmp"):
+            os.unlink(hp + ".xmp")  # darktable's sidecar
+        del state.assets[p]
+        log(f"deleted {hp} (deleted in Immich)")
+    state.save()
+    return len(on_disk)
+
+
 def wait_for_assets(immich, cfg, wanted):
     """Poll until every container path in `wanted` has an asset; return the missing ones."""
     missing = set(wanted)
@@ -256,10 +357,29 @@ def wait_for_assets(immich, cfg, wanted):
         delay = min(delay * 2, 30.0)
 
 
-# Reconcile the whole library
+# Reconcile the whole library, each step once per file
 
-def tag_assets(immich, cfg, assets, session_paths):
-    """Tag every untagged asset with its camera; return (newly tagged, model unknown)."""
+def add_all(immich, path, ids):
+    """PUT a bulk-ids endpoint in chunks; return (newly added, ids now members)."""
+    added, ok = 0, set()
+    for chunk in chunks(ids):
+        for r in immich.call("PUT", path, {"ids": chunk}):
+            if r.get("success"):
+                added += 1
+                ok.add(r["id"])
+            elif r.get("error") == "duplicate":
+                ok.add(r["id"])
+            else:
+                log(f"{path}: asset {r.get('id')}: {r.get('error')} {r.get('errorMessage', '')}".rstrip())
+    return added, ok
+
+
+def tag_assets(immich, cfg, state, assets, session_paths):
+    """Tag assets not tagged before; return (newly tagged, model unknown)."""
+    step = "tag:" + (cfg["tag"] or cfg["tag_prefix"] + "*")
+    todo = [a for a in assets if not state.done(a, step)]
+    if not todo:
+        return 0, 0
     lib = cfg["library"]
     if cfg["tag"]:
         is_camera_tag = lambda value: value == cfg["tag"]
@@ -269,35 +389,39 @@ def tag_assets(immich, cfg, assets, session_paths):
     for t in immich.call("GET", "/tags"):
         if is_camera_tag(t["value"]):
             tagged.update(a["id"] for a in immich.assets(lib, tagIds={"any": [t["id"]]}))
-    todo = [a for a in assets if a["id"] not in tagged]
-    if not todo:
-        return 0, 0
 
-    wanted = {}  # tag value -> asset ids
+    wanted = {}  # tag value -> assets
     unknown = 0
-    if cfg["tag"]:
-        wanted[cfg["tag"]] = [a["id"] for a in todo]
-    else:
-        for a in todo:
-            # EXIF first; the session's model only describes this session's
-            # files, not older queued batches (which may come from another body)
-            model = ((a.get("exifInfo") or {}).get("model") or "").strip()
-            if not model and a["originalPath"] in session_paths:
-                model = cfg["session_model"]
-            if not model:
-                unknown += 1
-                continue
-            wanted.setdefault(cfg["tag_prefix"] + model.replace("/", "-"), []).append(a["id"])
+    for a in todo:
+        if a["id"] in tagged:
+            state.mark(a, step)
+            continue
+        if cfg["tag"]:
+            wanted.setdefault(cfg["tag"], []).append(a)
+            continue
+        # EXIF first; the session's model only describes this session's
+        # files, not older queued batches (which may come from another body)
+        model = ((a.get("exifInfo") or {}).get("model") or "").strip()
+        if not model and a["originalPath"] in session_paths:
+            model = cfg["session_model"]
+        if not model:
+            unknown += 1
+            continue
+        wanted.setdefault(cfg["tag_prefix"] + model.replace("/", "-"), []).append(a)
     if not wanted:
         return 0, unknown
 
     ids = {t["value"]: t["id"] for t in immich.call("PUT", "/tags", {"tags": sorted(wanted)})}
     added = 0
-    for value, asset_ids in sorted(wanted.items()):
+    for value, members in sorted(wanted.items()):
         if value not in ids:
             raise Fail(f"tag upsert did not return {value!r}")
-        added += add_all(immich, f"/tags/{ids[value]}/assets", asset_ids)
-        log(f"tag {value!r}: {len(asset_ids)} asset(s)")
+        n, ok = add_all(immich, f"/tags/{ids[value]}/assets", [a["id"] for a in members])
+        added += n
+        for a in members:
+            if a["id"] in ok:
+                state.mark(a, step)
+        log(f"tag {value!r}: {len(members)} asset(s)")
     return added, unknown
 
 
@@ -308,27 +432,16 @@ def ensure_album(immich, name):
     return immich.call("POST", "/albums", {"albumName": name})["id"], True
 
 
-def add_all(immich, path, ids):
-    """PUT a bulk-ids endpoint in chunks; count new members (duplicates are fine)."""
-    added = 0
-    for chunk in chunks(ids):
-        for r in immich.call("PUT", path, {"ids": chunk}):
-            if r.get("success"):
-                added += 1
-            elif r.get("error") != "duplicate":
-                log(f"{path}: asset {r.get('id')}: {r.get('error')} {r.get('errorMessage', '')}".rstrip())
-    return added
-
-
-def reconcile(immich, cfg, new_paths, session_paths):
+def reconcile(immich, cfg, state, new_paths, session_paths):
     root = cfg["container_root"] + "/"
     assets = [a for a in immich.assets(cfg["library"], with_exif=True, originalPath={"startsWith": root})
               if a["originalPath"].startswith(root)]
+    for a in assets:
+        state.see(a)
     by_path = {a["originalPath"]: a for a in assets}
     stats = {"assets": len(assets)}
 
-    # Tag every asset with the camera it came from
-    stats["tagged"], unknown = tag_assets(immich, cfg, assets, session_paths)
+    stats["tagged"], unknown = tag_assets(immich, cfg, state, assets, session_paths)
     if unknown:
         log(f"{unknown} asset(s) not tagged yet: Immich has no camera model for them; a later run will")
 
@@ -349,26 +462,37 @@ def reconcile(immich, cfg, new_paths, session_paths):
 
     stats["stacked"] = stats["archived"] = 0
     if cfg["mode"] == "stack":
-        stacked = {s_asset["id"] for s in immich.call("GET", "/stacks") for s_asset in s.get("assets", [])}
-        for jpg, raf in pairs:
-            if jpg["id"] in stacked or raf["id"] in stacked:
-                continue
-            # The first ID becomes the cover
-            immich.call("POST", "/stacks", {"assetIds": [jpg["id"], raf["id"]]})
-            stats["stacked"] += 1
+        todo = [(j, r) for j, r in pairs if not (state.done(j, "stack") and state.done(r, "stack"))]
+        if todo:
+            stacked = {s_asset["id"] for s in immich.call("GET", "/stacks") for s_asset in s.get("assets", [])}
+        for jpg, raf in todo:
+            if jpg["id"] not in stacked and raf["id"] not in stacked:
+                # The first ID becomes the cover
+                immich.call("POST", "/stacks", {"assetIds": [jpg["id"], raf["id"]]})
+                stats["stacked"] += 1
+            state.mark(jpg, "stack")
+            state.mark(raf, "stack")
     else:
-        to_archive = [raf["id"] for _, raf in pairs if raf.get("visibility") == "timeline"]
+        todo = [raf for _, raf in pairs if not state.done(raf, "archive")]
+        to_archive = [raf["id"] for raf in todo if raf.get("visibility") == "timeline"]
         for chunk in chunks(to_archive):
             immich.call("PUT", "/assets", {"ids": chunk, "visibility": "archive"})
         stats["archived"] = len(to_archive)
+        for raf in todo:
+            state.mark(raf, "archive")
 
-    # Every RAF, paired or not, goes into the RAW album
-    album_id, created = ensure_album(immich, cfg["album"])
-    if created:
-        log(f"created album {cfg['album']!r}")
-    in_album = {a["id"] for a in immich.assets(cfg["library"], albumIds={"any": [album_id]})}
-    raws = [a["id"] for a in assets if kind(a["originalPath"]) == "raw" and a["id"] not in in_album]
-    stats["album"] = add_all(immich, f"/albums/{album_id}/assets", raws)
+    # Each RAF, paired or not, goes into the RAW album once
+    album_step = "album:" + cfg["album"]
+    raws = [a for a in assets if kind(a["originalPath"]) == "raw" and not state.done(a, album_step)]
+    stats["album"] = 0
+    if raws:
+        album_id, created = ensure_album(immich, cfg["album"])
+        if created:
+            log(f"created album {cfg['album']!r}")
+        stats["album"], ok = add_all(immich, f"/albums/{album_id}/assets", [a["id"] for a in raws])
+        for a in raws:
+            if a["id"] in ok:
+                state.mark(a, album_step)
 
     # Unpaired files among this run's new ones
     paired = {a["originalPath"] for p in pairs for a in p}
@@ -386,7 +510,8 @@ def check(immich, cfg):
     if not os.path.isdir(cfg["host_root"]):
         raise Fail(f"PHOTO_ROOT_HOST {cfg['host_root']} is not a directory")
     n = len(immich.assets(cfg["library"]))
-    log(f"ok: {n} asset(s) in the library, RAW_MODE={cfg['mode']}")
+    log(f"ok: {n} asset(s) in the library, RAW_MODE={cfg['mode']}, "
+        f"DELETE_REMOVED={int(cfg['delete'])} (limit {cfg['delete_limit']})")
 
 
 def run(cfg):
@@ -409,13 +534,20 @@ def run(cfg):
             os.unlink(list_path)
 
     immich.require_version()
+    state = State(cfg)
+    # Before the scan, which would import them again
+    deleted = remove_deleted(immich, cfg, state)
+
     immich.call("POST", f"/libraries/{cfg['library']}/scan")
     log(f"scan started; waiting for {len(wanted)} file(s)")
     missing = wait_for_assets(immich, cfg, wanted) if wanted else set()
     for p in sorted(missing):
         log(f"not in Immich yet: {p}")
 
-    stats = reconcile(immich, cfg, set(wanted) - missing, session_paths)
+    try:
+        stats = reconcile(immich, cfg, state, set(wanted) - missing, session_paths)
+    finally:
+        state.save()  # keep what was done, even if a later step failed
 
     for list_path, paths in batches.items():
         if paths and not missing.intersection(paths):
@@ -424,8 +556,8 @@ def run(cfg):
     raw_line = (f"{stats['stacked']} pair(s) stacked" if cfg["mode"] == "stack"
                 else f"{stats['archived']} paired RAF(s) archived")
     log(f"done: {len(wanted) - len(missing)} new file(s) found, {len(missing)} still missing; "
-        f"{stats['tagged']} tagged, {raw_line}, {stats['album']} RAF(s) added to {cfg['album']!r} "
-        f"({stats['assets']} asset(s) in the library)")
+        f"{stats['tagged']} tagged, {raw_line}, {stats['album']} RAF(s) added to {cfg['album']!r}, "
+        f"{deleted} deleted ({stats['assets']} asset(s) in the library)")
     for p in stats["unpaired"]:
         log(f"unpaired: {p}")
     return 1 if missing else 0

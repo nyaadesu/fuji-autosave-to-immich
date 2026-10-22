@@ -53,6 +53,18 @@ print(eval(sys.argv[2]))' "$IMMICH_URL" "$1"
 
 hook() { "$HERE/scripts/immich-hook" "$@" 2>> "$T/hook.log"; }
 
+# Act like a user in Immich's web UI: user OP [container path]
+user() {
+	python3 -c '
+import json, sys, urllib.request
+body = {"op": sys.argv[2]}
+if len(sys.argv) > 3:
+    body["path"] = sys.argv[3]
+req = urllib.request.Request(sys.argv[1] + "/_user", data=json.dumps(body).encode(), method="POST",
+                             headers={"x-api-key": "test-key", "Content-Type": "application/json"})
+urllib.request.urlopen(req)' "$IMMICH_URL" "$@"
+}
+
 # As the receiver sets them; the model is what the camera reported this session
 export FUJI_STATE_DIR="$T/state" FUJI_INBOX="$T/lib" FUJI_CAMERA_NAME=VCAM FUJI_CAMERA_MODEL="X-T30 II"
 export IMMICH_API_KEY=test-key LIBRARY_ID=11111111-1111-4111-8111-111111111111
@@ -184,5 +196,55 @@ if hook "$T/state/batches/b11.list"; then fail "hook ran against Immich 3.1"; fi
 grep -q 'Immich 3.1.4 is too old; this hook needs 3.2 or newer' "$T/hook.log" || fail "version error not logged"
 [ -f "$T/state/batches/b11.list" ] || fail "batch dropped on version error"
 ! grep -q '^POST /api/libraries' "$T/srv/calls.log" || fail "scanned despite the version error"
+
+# 11. What the user changes in Immich sticks: unstack, remove from the album,
+#     untag. A trashed photo is left alone; a permanently deleted one has its
+#     file (and darktable sidecar) deleted before the scan would import it again.
+setup
+batch b12 $D1/DSCF0070.JPG $D1/DSCF0070.RAF $D1/DSCF0071.JPG $D1/DSCF0071.RAF $D1/DSCF0072.JPG $D1/DSCF0072.RAF
+echo xmp > "$T/lib/$D1/DSCF0072.RAF.xmp"
+hook "$T/state/batches/b12.list" || fail "run before user changes failed"
+[ "$(state 'len(s["stacks"])')" = 3 ] || fail "pairs not stacked"
+user unstack $M/$D1/DSCF0070.JPG
+user album_remove $M/$D1/DSCF0071.RAF
+user untag $M/$D1/DSCF0071.JPG
+user trash $M/$D1/DSCF0072.JPG
+user delete $M/$D1/DSCF0072.RAF
+: > "$T/srv/calls.log"
+hook || fail "run after user changes failed"
+[ "$(state 'len(s["stacks"])')" = 1 ] || fail "unstacked pair stacked again: $(state 's["stacks"]')"
+[ "$(state '"'$M/$D1/DSCF0071.RAF'" in s["albums"]["Fuji RAW"]')" = False ] || fail "RAF put back into the album"
+[ "$(state '"'$M/$D1/DSCF0071.JPG'" in s["tags"]["Camera/X-T30 II"]')" = False ] || fail "untagged file tagged again"
+[ -f "$T/lib/$D1/DSCF0072.JPG" ] || fail "trashed photo's file deleted"
+[ ! -e "$T/lib/$D1/DSCF0072.RAF" ] || fail "deleted photo's file kept"
+[ ! -e "$T/lib/$D1/DSCF0072.RAF.xmp" ] || fail "deleted photo's sidecar kept"
+[ "$(state '"'$M/$D1/DSCF0072.RAF'" in s["assets"]')" = False ] || fail "deleted photo imported again"
+grep -q "deleted $T/lib/$D1/DSCF0072.RAF (deleted in Immich)" "$T/hook.log" || fail "deletion not logged"
+! grep -q -E '^(POST /api/stacks|PUT /api/albums|PUT /api/tags/)' "$T/srv/calls.log" || fail "re-run changed Immich: $(grep -E '^(POST /api/stacks|PUT /api/albums|PUT /api/tags/)' "$T/srv/calls.log")"
+
+# 12. Changing a setting applies once to everything: a renamed RAW album gets
+#     the RAFs (except the deleted one), a fixed CAMERA_TAG all live assets
+#     (not the trashed DSCF0072.JPG)
+RAW_ALBUM_NAME="RAW 2" CAMERA_TAG=Fuji hook || fail "run with new settings failed"
+[ "$(state 'len(s["albums"]["RAW 2"])')" = 2 ] || fail "renamed album not filled: $(state 's["albums"]')"
+[ "$(state 'len(s["tags"]["Fuji"])')" = 4 ] || fail "new fixed tag not applied: $(state 's["tags"]')"
+
+# 13. DELETE_REMOVED=0 leaves files alone; they come back with the scan
+user delete $M/$D1/DSCF0071.JPG
+DELETE_REMOVED=0 hook || fail "run with DELETE_REMOVED=0 failed"
+[ -f "$T/lib/$D1/DSCF0071.JPG" ] || fail "file deleted despite DELETE_REMOVED=0"
+[ "$(state '"'$M/$D1/DSCF0071.JPG'" in s["assets"]')" = True ] || fail "file not imported again"
+
+# 14. Safety stops: too many deletions at once, or Immich listing nothing at
+#     all, delete nothing and fail loudly
+user delete $M/$D1/DSCF0070.JPG
+user delete $M/$D1/DSCF0070.RAF
+if DELETE_LIMIT=1 hook; then fail "hook deleted more than DELETE_LIMIT"; fi
+[ -f "$T/lib/$D1/DSCF0070.JPG" ] && [ -f "$T/lib/$D1/DSCF0070.RAF" ] || fail "files deleted over the limit"
+grep -q "2 of 5 recorded file(s) are no longer in Immich" "$T/hook.log" || fail "limit error not logged"
+user wipe
+if hook; then fail "hook ran against an empty Immich"; fi
+grep -q "Immich lists no assets in the library, but 5 are recorded" "$T/hook.log" || fail "empty-Immich error not logged"
+[ "$(find "$T/lib" -type f | wc -l)" = 5 ] || fail "files deleted although Immich listed nothing"
 
 echo "immich-hook: all checks passed"

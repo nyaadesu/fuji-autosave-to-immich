@@ -144,10 +144,33 @@ How the implementation maps onto the plan:
   `**/.incoming/**` to the library's exclusion patterns. A file already in the
   library is skipped, even if `seen.tsv` was lost (see below).
 - **Steps 2–7 are `scripts/immich-hook`** (Python 3, stdlib only), run by the
-  receiver after each batch with new files. Steps 4–6 reconcile the **whole
-  library** on every run (tag missing, stack unstacked pairs, add missing RAFs
-  to the album), so files from timed-out or failed runs are caught up
+  receiver after each batch with new files. Steps 4–6 look at the **whole
+  library** on every run, so files from timed-out or failed runs are caught up
   automatically. A batch list stays queued until all its files were found.
+- **Each step happens once per file.** `$FUJI_STATE_DIR/library.json`
+  records each file's asset ID and the steps done (`tag:<tag>`, `stack`,
+  `archive`, `album:<name>`), so changes made in Immich afterwards (unstack,
+  remove from the album, untag, unarchive) are not undone. A changed
+  `CAMERA_TAG(_PREFIX)` or `RAW_ALBUM_NAME` is a new step and applies once to
+  every file. A file that shows up with a new asset ID starts over.
+- **Deleting in Immich deletes the file (a change from "never delete files").**
+  In Immich v3.3.5, permanently deleting an external asset (or emptying the trash)
+  removes its database row and queues a delete of the original and its
+  sidecar. With the read-only mount that delete fails, and the next scan
+  (`filterNewExternalAssetPaths`: any path without a row) imports the file
+  again. So before every scan, the hook looks for recorded files whose asset
+  is gone, or has a different ID, while the file is still on disk, and deletes
+  the file and its `<file>.xmp` itself. A trashed asset still has its row and
+  is left alone, so Immich's trash remains the undo window. The safety stops:
+  - only files recorded in `library.json`
+  - nothing if Immich lists no assets in the library
+  - at most `DELETE_LIMIT` (50) files per run, and not more than half the
+    library; a run that would delete more fails instead
+  - `DELETE_REMOVED=0` to turn deletion off
+
+  Immich's own periodic scan has to be off, or it re-imports a deleted photo
+  before the hook sees it. The hook still deletes the file then, and the
+  re-imported asset goes offline.
 - Each file's mtime is the capture instant (the UTC PTP date). "Already in
   the library" means the same name with the same size **and** mtime in the day
   folder of the UTC date or the day on either side of it. The EXIF folder isn't known
