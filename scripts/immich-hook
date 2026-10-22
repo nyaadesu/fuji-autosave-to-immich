@@ -1,97 +1,352 @@
-#!/bin/sh
-# Post-batch hook for fuji-autosave-receiver.
-#
-# Uploads every pending batch list in $FUJI_STATE_DIR/batches/ to Immich with
-# the Immich CLI and moves the uploaded files to an archive folder. A batch that
-# fails stays queued and is retried the next time the hook runs (Immich dedupes
-# by checksum, so retries are safe).
-#
-# Settings come from the environment and from $FUJI_ENV_FILE
-# (default /etc/fuji-autosave/env; see packaging/fuji-autosave.env.example):
-#   IMMICH_INSTANCE_URL, IMMICH_API_KEY   required, read by the Immich CLI
-#   FUJI_IMMICH_ALBUM     album to add uploads to (optional)
-#   FUJI_ARCHIVE_DIR      where uploaded files go (default $FUJI_INBOX/archive)
-#   FUJI_KEEP_FILES=1     leave uploaded files in the inbox instead
-#   IMMICH_BIN            Immich CLI command (default: immich)
-#
-# Set by the receiver: FUJI_STATE_DIR, FUJI_INBOX, FUJI_CAMERA_NAME, FUJI_BATCH_*
-# Run it by hand as the service user to retry pending batches.
-set -u
+#!/usr/bin/env python3
+"""Post-batch hook for fuji-autosave-receiver: Immich external library flow.
 
-# Settings file shared with the service; values already in the environment win
-ENV_FILE=${FUJI_ENV_FILE:-/etc/fuji-autosave/env}
-if [ -r "$ENV_FILE" ]; then
-	saved=$(export -p)
-	set -a
-	. "$ENV_FILE"
-	set +a
-	eval "$saved"
-fi
-FUJI_STATE_DIR=${FUJI_STATE_DIR:-/var/lib/fuji-autosave}
+The receiver writes straight into the external library root
+(PHOTO_ROOT_HOST, e.g. /data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF). This hook:
 
-: "${FUJI_STATE_DIR:?FUJI_STATE_DIR is not set}"
-: "${FUJI_INBOX:?FUJI_INBOX is not set}"
-: "${IMMICH_INSTANCE_URL:?IMMICH_INSTANCE_URL is not set}"
-: "${IMMICH_API_KEY:?IMMICH_API_KEY is not set}"
-export IMMICH_INSTANCE_URL IMMICH_API_KEY
-IMMICH_BIN=${IMMICH_BIN:-immich}
-ARCHIVE=${FUJI_ARCHIVE_DIR:-$FUJI_INBOX/archive}
-BATCHES=$FUJI_STATE_DIR/batches
+  1. asks Immich to scan the library,
+  2. waits until every file of the pending batches has an asset,
+  3. tags every library asset with CAMERA_TAG,
+  4. stacks each JPEG+RAF pair (JPEG as cover), or with RAW_MODE=archive
+     archives the paired RAF instead,
+  5. adds every RAF to the RAW_ALBUM_NAME album,
+  6. logs a summary.
 
-log() { echo "immich-hook: $*" >&2; }
+Steps 3-5 run over the whole library, so anything an earlier run missed
+(scan timeout, Immich down) is caught up. Everything is safe to repeat. A batch
+list stays queued in $FUJI_STATE_DIR/batches/ until all its files were found.
+Files are never moved, renamed or deleted.
 
-# One hook at a time; a later run waits, then picks up whatever is still queued.
-# (Plain flock: busybox's has no -w timeout.)
-exec 9>"$FUJI_STATE_DIR/hook.lock"
-flock 9 || { log "cannot lock $FUJI_STATE_DIR/hook.lock"; exit 1; }
+Settings come from the environment and from $FUJI_ENV_FILE
+(default /etc/fuji-autosave/env; see packaging/fuji-autosave.env.example):
+  IMMICH_URL            e.g. http://immich.lan:2283 (a trailing /api is fine)
+  IMMICH_API_KEY        API key of the library's owner
+  LIBRARY_ID            external library UUID
+  PHOTO_ROOT_HOST       library root as this hook sees it (default $FUJI_INBOX)
+  PHOTO_ROOT_CONTAINER  the same root as Immich sees it (e.g. /mnt/fuji)
+  RAW_ALBUM_NAME        default "Fuji RAW"
+  CAMERA_TAG            default "Camera/X-T30 II"
+  RAW_MODE              stack (default) or archive
+  SCAN_TIMEOUT          seconds to wait for new assets (default 900)
 
-archive_file() {
-	f=$1
-	day=$(basename "$(dirname "$f")")
-	mkdir -p "$ARCHIVE/$day" || return 1
-	dest=$ARCHIVE/$day/$(basename "$f")
-	if [ -e "$dest" ]; then
-		dest=$ARCHIVE/$day/$(date +%s)-$(basename "$f")
-	fi
-	mv -n "$f" "$dest"
-}
+Set by the receiver: FUJI_STATE_DIR, FUJI_INBOX, FUJI_BATCH_*, FUJI_CAMERA_*.
+Run it by hand as the service user to retry pending batches, or with --check
+to test the settings and the API key.
+"""
+import fcntl
+import glob
+import json
+import os
+import posixpath
+import sys
+import time
+import urllib.error
+import urllib.request
 
-uploaded=0
-failed=0
-for list in "$BATCHES"/*.list; do
-	[ -e "$list" ] || continue
+JPEG_EXTS = {".jpg", ".jpeg"}
+RAW_EXTS = {".raf"}
+PAGE_SIZE = 1000
+CHUNK = 500
 
-	# Files that still exist (a retried batch may be partly archived already)
-	set --
-	while IFS= read -r f; do
-		[ -n "$f" ] && [ -f "$f" ] && set -- "$@" "$f"
-	done < "$list"
-	if [ $# -eq 0 ]; then
-		rm -f "$list"
-		continue
-	fi
 
-	log "uploading $# file(s) from $(basename "$list")"
-	if [ -n "${FUJI_IMMICH_ALBUM:-}" ]; then
-		"$IMMICH_BIN" upload --album-name "$FUJI_IMMICH_ALBUM" "$@"
-	else
-		"$IMMICH_BIN" upload "$@"
-	fi
-	rc=$?
-	if [ $rc -ne 0 ]; then
-		log "upload failed ($rc); $(basename "$list") stays queued"
-		failed=$((failed + $#))
-		continue
-	fi
+def log(msg):
+    print(f"immich-hook: {msg}", file=sys.stderr, flush=True)
 
-	if [ "${FUJI_KEEP_FILES:-0}" != 1 ]; then
-		for f in "$@"; do
-			archive_file "$f" || log "could not archive $f"
-		done
-	fi
-	uploaded=$((uploaded + $#))
-	rm -f "$list"
-done
 
-log "done: $uploaded uploaded, $failed queued for retry"
-[ $failed -eq 0 ]
+class Fail(Exception):
+    pass
+
+
+def load_env_file(path):
+    """KEY=value lines as written for /bin/sh; values already in os.environ win."""
+    try:
+        f = open(path)
+    except OSError:
+        return
+    with f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if key.startswith("export "):
+                key = key[7:].strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+
+
+def config():
+    load_env_file(os.environ.get("FUJI_ENV_FILE", "/etc/fuji-autosave/env"))
+    env = os.environ
+    missing = [k for k in ("IMMICH_URL", "IMMICH_API_KEY", "LIBRARY_ID", "PHOTO_ROOT_CONTAINER") if not env.get(k)]
+    host_root = env.get("PHOTO_ROOT_HOST") or env.get("FUJI_INBOX")
+    if not host_root:
+        missing.append("PHOTO_ROOT_HOST (or FUJI_INBOX)")
+    if missing:
+        raise Fail("not set: " + ", ".join(missing))
+    url = env["IMMICH_URL"].rstrip("/")
+    if url.endswith("/api"):
+        url = url[:-4]
+    mode = env.get("RAW_MODE", "stack")
+    if mode not in ("stack", "archive"):
+        raise Fail(f"RAW_MODE must be stack or archive, not {mode!r}")
+    try:
+        timeout = float(env.get("SCAN_TIMEOUT") or 900)
+    except ValueError:
+        raise Fail(f"SCAN_TIMEOUT must be a number of seconds, not {env['SCAN_TIMEOUT']!r}") from None
+    return {
+        "api": url + "/api",
+        "key": env["IMMICH_API_KEY"],
+        "library": env["LIBRARY_ID"],
+        "host_root": os.path.normpath(host_root),
+        "container_root": posixpath.normpath(env["PHOTO_ROOT_CONTAINER"]),
+        "album": env.get("RAW_ALBUM_NAME") or "Fuji RAW",
+        "tag": env.get("CAMERA_TAG") or "Camera/X-T30 II",
+        "mode": mode,
+        "timeout": timeout,
+        "state_dir": env.get("FUJI_STATE_DIR") or "/var/lib/fuji-autosave",
+    }
+
+
+class Immich:
+    def __init__(self, cfg):
+        self.api = cfg["api"]
+        self.key = cfg["key"]
+
+    def call(self, method, path, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(self.api + path, data=data, method=method)
+        req.add_header("x-api-key", self.key)
+        req.add_header("Accept", "application/json")
+        if data is not None:
+            req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            raise Fail(f"{method} {path}: HTTP {e.code} {detail}") from None
+        except (urllib.error.URLError, OSError) as e:
+            raise Fail(f"{method} {path}: {e}") from None
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            raise Fail(f"{method} {path}: response is not JSON (wrong IMMICH_URL?)") from None
+
+    def search(self, **filters):
+        """All assets matching a /search/metadata filter, across pages."""
+        page, items = 1, []
+        while True:
+            res = self.call("POST", "/search/metadata", dict(filters, page=page, size=PAGE_SIZE))
+            assets = res["assets"]
+            items.extend(assets["items"])
+            if not assets.get("nextPage"):
+                return items
+            page = int(assets["nextPage"])
+
+
+def chunks(ids):
+    ids = list(ids)
+    for i in range(0, len(ids), CHUNK):
+        yield ids[i:i + CHUNK]
+
+
+def kind(path):
+    ext = posixpath.splitext(path)[1].lower()
+    return "jpeg" if ext in JPEG_EXTS else "raw" if ext in RAW_EXTS else None
+
+
+def pair_key(path):
+    # Pairs share a stem within one day folder (counter rollover is per day)
+    d, name = posixpath.split(path)
+    return d, posixpath.splitext(name)[0].upper()
+
+
+# Pending batches
+
+def load_batches(cfg):
+    """{list path: [container paths]} for queued batch lists, minus vanished files."""
+    batches = {}
+    prefix = cfg["host_root"] + os.sep
+    for list_path in sorted(glob.glob(os.path.join(cfg["state_dir"], "batches", "*.list"))):
+        paths = []
+        with open(list_path) as f:
+            for line in f:
+                p = os.path.normpath(line.rstrip("\n")) if line.strip() else None
+                if p is None or not os.path.isfile(p):
+                    continue
+                if not p.startswith(prefix):
+                    log(f"{p} is outside PHOTO_ROOT_HOST {cfg['host_root']}, ignoring")
+                    continue
+                rel = p[len(prefix):].replace(os.sep, "/")
+                paths.append(posixpath.join(cfg["container_root"], rel))
+        batches[list_path] = paths
+    return batches
+
+
+def wait_for_assets(immich, cfg, wanted):
+    """Poll until every container path in `wanted` has an asset; return the missing ones."""
+    missing = set(wanted)
+    folders = sorted({posixpath.dirname(p) + "/" for p in missing})
+    deadline = time.monotonic() + cfg["timeout"]
+    delay = 2.0
+    while True:
+        for folder in folders:
+            # originalPath is a substring match; compare exactly here
+            for a in immich.search(libraryId=cfg["library"], originalPath=folder):
+                missing.discard(a["originalPath"])
+        if not missing:
+            return missing
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return missing
+        folders = sorted({posixpath.dirname(p) + "/" for p in missing})
+        time.sleep(min(delay, left))
+        delay = min(delay * 2, 30.0)
+
+
+# Reconcile the whole library
+
+def ensure_tag(immich, name):
+    tags = immich.call("PUT", "/tags", {"tags": [name]})
+    for t in tags:
+        if t.get("value") == name:
+            return t["id"]
+    raise Fail(f"tag upsert did not return {name!r}")
+
+
+def ensure_album(immich, name):
+    for a in immich.call("GET", "/albums?isOwned=true"):
+        if a["albumName"] == name:
+            return a["id"], False
+    return immich.call("POST", "/albums", {"albumName": name})["id"], True
+
+
+def add_all(immich, path, ids):
+    """PUT a bulk-ids endpoint in chunks; count new members (duplicates are fine)."""
+    added = 0
+    for chunk in chunks(ids):
+        for r in immich.call("PUT", path, {"ids": chunk}):
+            if r.get("success"):
+                added += 1
+            elif r.get("error") != "duplicate":
+                log(f"{path}: asset {r.get('id')}: {r.get('error')} {r.get('errorMessage', '')}".rstrip())
+    return added
+
+
+def reconcile(immich, cfg, new_paths):
+    root = cfg["container_root"] + "/"
+    assets = [a for a in immich.search(libraryId=cfg["library"])
+              if a["originalPath"].startswith(root) and not a.get("isOffline")]
+    by_path = {a["originalPath"]: a for a in assets}
+    stats = {"assets": len(assets)}
+
+    # Tag every asset from the camera
+    tag_id = ensure_tag(immich, cfg["tag"])
+    tagged = {a["id"] for a in immich.search(libraryId=cfg["library"], tagIds=[tag_id])}
+    stats["tagged"] = add_all(immich, f"/tags/{tag_id}/assets", [a["id"] for a in assets if a["id"] not in tagged])
+
+    # Pair JPEG and RAF by folder + stem
+    groups = {}
+    for a in assets:
+        k = kind(a["originalPath"])
+        if k:
+            groups.setdefault(pair_key(a["originalPath"]), {}).setdefault(k, []).append(a)
+    pairs = []
+    for g in groups.values():
+        if len(g.get("jpeg", [])) == 1 and len(g.get("raw", [])) == 1:
+            pairs.append((g["jpeg"][0], g["raw"][0]))
+
+    stats["stacked"] = stats["archived"] = 0
+    if cfg["mode"] == "stack":
+        stacked = {s_asset["id"] for s in immich.call("GET", "/stacks") for s_asset in s.get("assets", [])}
+        for jpg, raf in pairs:
+            if jpg["id"] in stacked or raf["id"] in stacked:
+                continue
+            # The first ID becomes the cover
+            immich.call("POST", "/stacks", {"assetIds": [jpg["id"], raf["id"]]})
+            stats["stacked"] += 1
+    else:
+        to_archive = [raf["id"] for _, raf in pairs if raf.get("visibility") == "timeline"]
+        for chunk in chunks(to_archive):
+            immich.call("PUT", "/assets", {"ids": chunk, "visibility": "archive"})
+        stats["archived"] = len(to_archive)
+
+    # Every RAF, paired or not, goes into the RAW album
+    album_id, created = ensure_album(immich, cfg["album"])
+    if created:
+        log(f"created album {cfg['album']!r}")
+    in_album = {a["id"] for a in immich.search(libraryId=cfg["library"], albumIds=[album_id])}
+    raws = [a["id"] for a in assets if kind(a["originalPath"]) == "raw" and a["id"] not in in_album]
+    stats["album"] = add_all(immich, f"/albums/{album_id}/assets", raws)
+
+    # Unpaired files among this run's new ones
+    paired = {a["originalPath"] for p in pairs for a in p}
+    stats["unpaired"] = sorted(p for p in new_paths if p in by_path and kind(p) and p not in paired)
+    return stats
+
+
+def check(immich, cfg):
+    lib = immich.call("GET", f"/libraries/{cfg['library']}")
+    log(f"library {lib.get('name')!r}, import paths {lib.get('importPaths')}")
+    paths = [posixpath.normpath(p) for p in lib.get("importPaths", [])]
+    if cfg["container_root"] not in paths:
+        raise Fail(f"PHOTO_ROOT_CONTAINER {cfg['container_root']} is not an import path of this library")
+    if not os.path.isdir(cfg["host_root"]):
+        raise Fail(f"PHOTO_ROOT_HOST {cfg['host_root']} is not a directory")
+    n = len(immich.search(libraryId=cfg["library"]))
+    log(f"ok: {n} asset(s) in the library, RAW_MODE={cfg['mode']}")
+
+
+def run(cfg):
+    immich = Immich(cfg)
+    if "--check" in sys.argv[1:]:
+        check(immich, cfg)
+        return 0
+
+    batches = load_batches(cfg)
+    wanted = sorted({p for paths in batches.values() for p in paths})
+    for list_path, paths in batches.items():
+        if not paths:
+            os.unlink(list_path)
+
+    immich.call("POST", f"/libraries/{cfg['library']}/scan")
+    log(f"scan started; waiting for {len(wanted)} file(s)")
+    missing = wait_for_assets(immich, cfg, wanted) if wanted else set()
+    for p in sorted(missing):
+        log(f"not in Immich yet: {p}")
+
+    stats = reconcile(immich, cfg, set(wanted) - missing)
+
+    for list_path, paths in batches.items():
+        if paths and not missing.intersection(paths):
+            os.unlink(list_path)
+
+    raw_line = (f"{stats['stacked']} pair(s) stacked" if cfg["mode"] == "stack"
+                else f"{stats['archived']} paired RAF(s) archived")
+    log(f"done: {len(wanted) - len(missing)} new file(s) found, {len(missing)} still missing; "
+        f"{stats['tagged']} tagged, {raw_line}, {stats['album']} RAF(s) added to {cfg['album']!r} "
+        f"({stats['assets']} asset(s) in the library)")
+    for p in stats["unpaired"]:
+        log(f"unpaired: {p}")
+    return 1 if missing else 0
+
+
+def main():
+    try:
+        cfg = config()
+        os.makedirs(cfg["state_dir"], exist_ok=True)
+        # One hook at a time; a later run waits, then picks up whatever is still queued
+        with open(os.path.join(cfg["state_dir"], "hook.lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            return run(cfg)
+    except Fail as e:
+        log(f"error: {e}; pending batches stay queued")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

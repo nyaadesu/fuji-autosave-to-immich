@@ -3,10 +3,14 @@
 
 # Name the camera shows in its PC AutoSave list (1-24 characters)
 #FUJI_CLIENT_NAME=fuji-inbox
-#FUJI_INBOX=/srv/fuji-inbox
+# The Immich external library root, bind-mounted into this container
+#FUJI_INBOX=/data2/fuji
 #FUJI_STATE_DIR=/var/lib/fuji-autosave
 #FUJI_USER=fuji
-# Set empty to run without the Immich upload (e.g. with an external library)
+# 002 makes new folders and files group-writable, so an SMB editing group can
+# add darktable/Lightroom sidecars next to the RAFs
+#FUJI_UMASK=022
+# Set empty to only receive files, without the Immich scan/tag/stack/album step
 #FUJI_HOOK=/usr/local/lib/fuji-autosave/immich-hook
 # e.g. --verbose
 #FUJI_EXTRA_ARGS=

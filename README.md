@@ -4,8 +4,12 @@ Wireless RAW from a Fujifilm camera into Immich. The daemon,
 `fuji-autosave-receiver`, is a headless FUJIFILM **PC AutoSave** target for
 Linux, built on [libfuji](https://github.com/petabyt/libfuji). The camera joins your Wi-Fi,
 finds this daemon instead of Fuji's Windows/macOS app, and pushes its new
-pictures. Each file lands in `<inbox>/YYYY-MM-DD/`, and a hook uploads the
-batch to Immich. You don't need a PC, a phone or a cable.
+pictures. Each file lands in `<inbox>/YYYY/YYYY-MM-DD/` under its camera
+name. The inbox is an Immich external library, and after each batch a hook
+has Immich scan it, tags the new files, stacks each RAF under its JPEG and
+collects the RAFs in an album. The RAFs stay plain files that darktable or
+Lightroom can edit in place over SMB. You don't need a PC, a phone or a cable.
+The design is in [docs/immich-import-plan.md](docs/immich-import-plan.md).
 
 It was written for an X-T30 II feeding a home-server Immich, but nothing here is
 specific to that body.
@@ -16,7 +20,7 @@ specific to that body.
 | --- | --- |
 | Discovery, register and connect handshakes | Tested against [vcam](https://github.com/petabyt/vcam) (emulated X-T4) |
 | PTP/IP session, RAF/JPG download, skip repeats, hook | Tested against vcam (`tests/e2e-vcam.sh`) |
-| Immich upload hook | Tested with a stub CLI (`tests/test-hook.sh`) |
+| Immich external-library hook | Tested against a fake Immich API modelled on v3.3.5 (`tests/test-hook.sh`); not yet run against a real Immich |
 | Alpine 3.24 (musl, busybox) | All of the above pass (`tests/alpine-rootless.sh`) |
 | A real X-T30 II (firmware 2.06) | Works: registered, then a 38-file RAW+JPEG batch (991 MB) arrived intact at ~1.9 MB/s |
 
@@ -37,13 +41,19 @@ only goes to the smartphone app.
 3. **Connect** (each time PC AutoSave runs): the daemon answers the invite, then
    opens a PTP/IP session to the camera on TCP 55740.
 4. The camera offers objects 1..N. For each one the daemon reads its object
-   info and skips it if `filename|date|size` is already in `seen.tsv`.
+   info and skips it if `filename|date|size` is already in `seen.tsv`, or if
+   a file of that name and size is already at its destination.
    Otherwise it downloads to `.incoming/NAME.part`, fsyncs, and renames into
-   `YYYY-MM-DD/` (the date the camera recorded the shot).
+   `YYYY/YYYY-MM-DD/` (the date the camera recorded the shot). Files are never
+   moved or changed after that, since Immich would treat a moved file as a new asset.
 5. After the session it starts the hook with a list of the new files.
-   `scripts/immich-hook` runs `immich upload` and moves the uploaded files to
-   an archive folder. A failed upload stays queued and retries with the next
-   batch.
+   `scripts/immich-hook` asks Immich to scan the library and waits until every
+   new file has an asset. It then tags all assets with `CAMERA_TAG`, stacks each
+   `DSCFnnnn.JPG` + `DSCFnnnn.RAF` pair (JPEG on top; or archives the RAF with
+   `RAW_MODE=archive`) and adds every RAF to the `RAW_ALBUM_NAME` album. Steps
+   that already happened are skipped, and the hook works over the whole library, so a
+   batch that timed out or hit an Immich outage stays queued and is caught up
+   by the next run.
 
 If a download fails partway through, the daemon drops the session. A half-read
 object leaves Fuji cameras unresponsive (see libfuji `lib/jank.c`). Files that
@@ -66,7 +76,7 @@ and musl alike.
 ## Run
 
 ```sh
-fuji-autosave-receiver --inbox /srv/fuji-inbox --state-dir /var/lib/fuji-autosave \
+fuji-autosave-receiver --inbox /data2/fuji --state-dir /var/lib/fuji-autosave \
     --name fuji-inbox --hook /usr/local/lib/fuji-autosave/immich-hook
 ```
 
@@ -83,8 +93,10 @@ fuji-autosave-receiver --inbox /srv/fuji-inbox --state-dir /var/lib/fuji-autosav
 The hook gets these variables: `FUJI_BATCH_LIST`, `FUJI_BATCH_COUNT`,
 `FUJI_INBOX`, `FUJI_STATE_DIR`, `FUJI_CAMERA_NAME` and `FUJI_CAMERA_MODEL`
 (the model is only known when registering). Batch lists hold absolute paths,
-one per line. `immich-hook`'s own settings are listed at the top of the script
-and in `packaging/fuji-autosave.env.example`.
+one per line. `immich-hook` needs Python 3 (standard library only). Its own
+settings are listed at the top of the script and in
+`packaging/fuji-autosave.env.example`. `immich-hook --check` tests them and the
+API key without changing anything.
 
 For the OpenRC service in an Alpine LXC, see [docs/deploy-lxc.md](docs/deploy-lxc.md).
 
@@ -110,7 +122,7 @@ client in "wireless communication" mode (not implemented here).
 ## Tests
 
 ```sh
-tests/test-hook.sh        # immich-hook with a stub Immich CLI
+tests/test-hook.sh        # immich-hook against a fake Immich API (tests/fake-immich.py)
 tests/test-register.sh    # registration against a scripted camera (quoted model name)
 tests/e2e-vcam.sh         # receiver vs. emulated camera, in a private network namespace
 tests/alpine-rootless.sh  # all of the above, built and run on Alpine (musl, busybox)

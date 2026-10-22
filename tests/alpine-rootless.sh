@@ -6,7 +6,7 @@
 #   tests/alpine-rootless.sh [rootfs-dir]   (default build/alpine-root)
 #
 # Phase 1 (host network): apk deps, build receiver and vcam.
-# Phase 2 (private network namespace): hook test with busybox tools, e2e test.
+# Phase 2 (private network namespace): hook test (python3 + busybox), e2e test.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 RFS=${1:-$ROOT/build/alpine-root}
@@ -31,7 +31,7 @@ if [ "${1:-}" = --inside ]; then
 	exec chroot "$RFS" /usr/bin/env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root /bin/sh -euc '
 		cd /work
 		sh -n packaging/fuji-autosave.initd
-		echo "flock is $(readlink -f "$(command -v flock)")"
+		ip link set lo up # the hook test talks to a fake Immich on 127.0.0.1
 		tests/test-hook.sh
 		E2E_NO_UNSHARE=1 tests/test-register.sh
 		E2E_NO_UNSHARE=1 tests/e2e-vcam.sh

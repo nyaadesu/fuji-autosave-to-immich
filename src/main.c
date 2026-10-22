@@ -1,6 +1,6 @@
 // fuji-autosave-receiver: a headless FUJIFILM PC AutoSave target built on libfuji.
 // Waits for the camera's AutoSave broadcast, pulls every new object over PTP/IP
-// into <inbox>/YYYY-MM-DD/, and runs a hook once per batch.
+// into <inbox>/YYYY/YYYY-MM-DD/, and runs a hook once per batch.
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -154,10 +154,10 @@ static int mkdir_p(const char *path) {
 	for (char *p = tmp + 1; *p; p++) {
 		if (*p != '/') continue;
 		*p = '\0';
-		if (mkdir(tmp, 0755) && errno != EEXIST) return -1;
+		if (mkdir(tmp, 0775) && errno != EEXIST) return -1;
 		*p = '/';
 	}
-	if (mkdir(tmp, 0755) && errno != EEXIST) return -1;
+	if (mkdir(tmp, 0775) && errno != EEXIST) return -1;
 	return 0;
 }
 
@@ -182,20 +182,32 @@ static void sanitize_name(const char *in, char *out, size_t size) {
 	else if (out[0] == '.') out[0] = '_';
 }
 
-// PTP dates look like "20261021T153012"; fall back to today's local date
-static void day_from_ptp_date(const char *date, char out[11]) {
+// "YYYY/YYYY-MM-DD" from a PTP date like "20261021T153012"; fall back to
+// today's local date
+#define DAY_DIR_LEN 16
+static void day_dir_from_ptp_date(const char *date, char out[DAY_DIR_LEN]) {
 	int ok = strlen(date) >= 8;
 	for (int i = 0; ok && i < 8; i++) {
 		if (date[i] < '0' || date[i] > '9') ok = 0;
 	}
 	if (ok) {
-		snprintf(out, 11, "%.4s-%.2s-%.2s", date, date + 4, date + 6);
+		snprintf(out, DAY_DIR_LEN, "%.4s/%.4s-%.2s-%.2s", date, date, date + 4, date + 6);
 		return;
 	}
 	time_t now = time(NULL);
 	struct tm tm;
 	localtime_r(&now, &tm);
-	strftime(out, 11, "%Y-%m-%d", &tm);
+	strftime(out, DAY_DIR_LEN, "%Y/%Y-%m-%d", &tm);
+}
+
+// 1 if the object's final path already holds a file of its size (e.g. the
+// seen list was lost); the inbox is never rewritten once Immich has indexed it
+static int already_in_inbox(const struct PtpObjectInfo *oi, const char *name) {
+	char day[DAY_DIR_LEN], path[PATH_MAX];
+	day_dir_from_ptp_date(oi->date_created, day);
+	if (snprintf(path, sizeof(path), "%s/%s/%s", cfg.inbox, day, name) >= (int)sizeof(path)) return 0;
+	struct stat st;
+	return stat(path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size == (off_t)oi->compressed_size;
 }
 
 // Pick <dir>/<name>, or <dir>/<stem>-N<ext> if that is taken
@@ -327,7 +339,8 @@ static int download_one(struct PtpRuntime *r, int handle, const struct PtpObject
 	if (snprintf(part, sizeof(part), "%s/%s.part", incoming, name) >= (int)sizeof(part)) return -1;
 
 	struct Sink sink = {0};
-	sink.fd = open(part, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+	// 0664 here and 0775 in mkdir_p: the umask decides (002 for a shared edit group)
+	sink.fd = open(part, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0664);
 	if (sink.fd < 0) {
 		log_err("open %s: %s", part, strerror(errno));
 		return -1;
@@ -347,8 +360,8 @@ static int download_one(struct PtpRuntime *r, int handle, const struct PtpObject
 		return rc;
 	}
 
-	char day[11], dir[PATH_MAX], final[PATH_MAX];
-	day_from_ptp_date(oi->date_created, day);
+	char day[DAY_DIR_LEN], dir[PATH_MAX], final[PATH_MAX];
+	day_dir_from_ptp_date(oi->date_created, day);
 	snprintf(dir, sizeof(dir), "%s/%s", cfg.inbox, day);
 	if (mkdir_p(dir) || unique_path(dir, name, final, sizeof(final))) {
 		log_err("cannot place %s in %s", name, dir);
@@ -385,7 +398,7 @@ static int run_session(struct DiscoverInfo *info, struct SeenStore *seen) {
 
 	struct Batch batch = {0};
 	int rc = 0, connected = 0;
-	int n_new = 0, n_skipped = 0;
+	int n_new = 0, n_skipped = 0, n_present = 0;
 
 	// The camera needs a moment after the invite before it accepts PTP/IP
 	usleep(1000 * 1000);
@@ -443,6 +456,16 @@ static int run_session(struct DiscoverInfo *info, struct SeenStore *seen) {
 			n_skipped++;
 			continue;
 		}
+		char name[128];
+		sanitize_name(oi.filename, name, sizeof(name));
+		if (already_in_inbox(&oi, name)) {
+			log_info("object %d: %s is already in the inbox, skipping", handle, name);
+			if (seen_add(seen, key, name)) {
+				log_err("could not record %s in the seen list: %s", name, strerror(errno));
+			}
+			n_present++;
+			continue;
+		}
 
 		rc = download_one(r, handle, &oi, key, seen, &batch);
 		// A half-read object leaves the camera unresponsive; drop the session
@@ -452,7 +475,11 @@ static int run_session(struct DiscoverInfo *info, struct SeenStore *seen) {
 
 	out:;
 	if (!cfg.list_only) {
-		log_info("session done: %d new, %d already seen", n_new, n_skipped);
+		if (n_present > 0) {
+			log_info("session done: %d new, %d already seen, %d already in the inbox", n_new, n_skipped, n_present);
+		} else {
+			log_info("session done: %d new, %d already seen", n_new, n_skipped);
+		}
 	}
 	if (connected) {
 		// Close session, send Fuji's goodbye packet, close sockets
@@ -574,7 +601,7 @@ int main(int argc, char **argv) {
 		for (int i = 0; i < RETRY_DELAY_SEC && !g_stop; i++) sleep(1);
 	}
 
-	// Let a running hook finish its upload before we exit
+	// Let a running hook finish (it may be waiting on an Immich scan) before we exit
 	while (waitpid(-1, NULL, 0) > 0 || errno == EINTR) {}
 	seen_close(&seen);
 	log_info("stopped");

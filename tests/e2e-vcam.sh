@@ -6,7 +6,7 @@
 # no root and does not touch the host network. Requires: unshare, ip, cmake,
 # ninja, libusb-1.0 and libexif headers.
 #
-# Checks: a batch is downloaded byte-identical, the hook gets the batch list,
+# Checks: a batch is downloaded byte-identical into YYYY/YYYY-MM-DD, the hook gets the batch list,
 # and a second session skips everything already received.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -72,8 +72,10 @@ session() {
 session 1
 # vcam counts its DCIM folders as objects but reports one fewer than it has,
 # so the last file in its tree is never offered; expect the first two files.
-day=$(ls "$WORK/inbox" | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
-[ -n "$day" ] || fail "no dated folder in inbox"
+year=$(ls "$WORK/inbox" | grep -E '^[0-9]{4}$')
+[ -n "$year" ] || fail "no year folder in inbox"
+day=$year/$(ls "$WORK/inbox/$year" | grep -E "^$year-[0-9]{2}-[0-9]{2}\$")
+[ -d "$WORK/inbox/$day" ] || fail "no YYYY/YYYY-MM-DD folder in inbox"
 for f in DSCF0001.RAF DSCF0002.RAF; do
 	cmp -s "$WORK/sd/DCIM/100_FUJI/$f" "$WORK/inbox/$day/$f" || fail "$f missing or corrupt"
 done
@@ -86,5 +88,12 @@ rm -f "$WORK/state/hook-saw.list"
 session 2
 grep -q 'session done: 0 new, 2 already seen' "$WORK/recv-2.log" || fail "second session re-downloaded files"
 [ ! -e "$WORK/state/hook-saw.list" ] || fail "hook ran for an empty batch"
+
+# Lost seen list: files already in the inbox are recognised, not downloaded again
+rm -f "$WORK/state/seen.tsv"
+session 3
+grep -q 'session done: 0 new, 0 already seen, 2 already in the inbox' "$WORK/recv-3.log" || fail "lost seen list caused re-downloads"
+[ "$(ls "$WORK/inbox/$day" | wc -l)" -eq 2 ] || fail "duplicate files after lost seen list"
+[ ! -e "$WORK/state/hook-saw.list" ] || fail "hook ran for files already in the inbox"
 
 echo "e2e: all checks passed"

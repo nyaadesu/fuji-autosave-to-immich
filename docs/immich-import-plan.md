@@ -1,0 +1,148 @@
+# Fuji → Immich import: plan
+
+This document is the agreed design for the camera import app. Use it as the source of truth for storage layout, Immich integration and the per-batch flow. Where an API detail is marked **verify**, confirm it against the running Immich instance's API docs (`/api/docs` or the docs for the installed version) before relying on it.
+
+## Goal
+
+Pull photos from a Fujifilm X-T30 II (shooting RAF + JPEG) onto the home server "roxy" so that:
+
+1. The camera JPEGs show in the Immich timeline right away for viewing.
+2. The RAF files are kept on disk as plain files that darktable or Lightroom Classic can open and edit in place over SMB.
+3. In Immich, each RAF is grouped with its JPEG, all RAFs are collected in their own album, and every file from the camera is tagged.
+
+Immich is the viewer and organiser. Editing happens in darktable / Lightroom Classic. Immich does not render darktable or Lightroom edits from XMP sidecars, so finished edits are exported as separate files (out of scope for this app, see "Later").
+
+## Storage layout
+
+Runs on roxy (Proxmox, ZFS pool `data2`, mounted at `/data2`). Existing datasets: `data2/backup`, `data2/config`, `data2/immich`, `data2/media`.
+
+```
+/data2/immich            Immich upload library (existing dataset, managed by Immich, do not write here)
+/data2/fuji              new dataset data2/fuji: external library root for this app, shared over SMB for editing
+```
+
+`/data2/fuji` must stay outside `/data2/immich`. Immich rejects external library paths inside its upload location.
+
+Dataset creation (one-time, done by the user, listed for context):
+
+```
+zfs create -o recordsize=1M -o compression=lz4 data2/fuji
+```
+
+File layout inside the external library:
+
+```
+/data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.JPG
+/data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF
+/data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF.xmp   (written later by darktable, never by this app)
+```
+
+- Date folder comes from the capture date in EXIF (fall back to file mtime if EXIF is missing).
+- Keep the camera's original filenames. JPEG and RAF share the stem `DSCF1234`, which is how pairs are matched.
+- The app never modifies, renames or deletes files after they are written. Immich treats a moved file as a deleted asset plus a new one, which drops it from albums and stacks.
+
+## Immich configuration (one-time, done by the user)
+
+Mount into `immich-server` read-only:
+
+```yaml
+immich-server:
+  volumes:
+    - /data2/fuji:/mnt/fuji:ro
+```
+
+- Create an external library owned by the user's account with import path `/mnt/fuji` (container path, not host path). Store its library ID in the app config.
+- Read-only matters: darktable owns the `.RAF.xmp` sidecars and Immich must not write to them.
+- Tags may need enabling per user under Account Settings → Features.
+
+App config values:
+
+| Key | Example |
+|---|---|
+| `IMMICH_URL` | `http://immich.lan:2283` |
+| `IMMICH_API_KEY` | from env / secrets, never committed |
+| `LIBRARY_ID` | external library UUID |
+| `PHOTO_ROOT_HOST` | `/data2/fuji` (where the app writes) |
+| `PHOTO_ROOT_CONTAINER` | `/mnt/fuji` (path Immich sees, needed for path lookups) |
+| `RAW_ALBUM_NAME` | `Fuji RAW` |
+| `CAMERA_TAG` | `Camera/X-T30 II` |
+
+API key permissions needed (**verify** exact names): library scan/read, asset read/update, stack create/read, album create/update, tag create/asset.
+
+## Per-batch flow
+
+1. **Copy files.** For each file from the camera, write to `<name>.part` in the target date folder, then rename to the final name once the copy has completed and been verified (size, optionally checksum). Immich must never see a partial file. Skip files that already exist at the destination with the same size/checksum.
+2. **Trigger a scan.** `POST /api/libraries/{LIBRARY_ID}/scan`.
+3. **Wait for assets.** Scanning and metadata extraction are asynchronous. Poll `POST /api/search/metadata` filtering by `originalPath` (container path, e.g. `/mnt/fuji/2026/2026-10-22/DSCF1234.JPG`) until each new file has an asset ID. Use backoff and an overall timeout. Batches of hundreds of RAFs can take minutes. (**verify** the search filter field name.)
+4. **Tag.** Ensure the tag exists with `PUT /api/tags` (upsert, name `CAMERA_TAG`), cache its ID, then `PUT /api/tags/{tagId}/assets` with the IDs of all new JPEGs and RAFs in one call.
+5. **Stack each pair.** `POST /api/stacks` with body `{"assetIds": [jpgId, rafId]}`. The first ID becomes the stack's cover, so the JPEG must be first. Skip pairs where either asset already has a `stack` set.
+6. **RAW album.** Look up or create the album named `RAW_ALBUM_NAME` (`POST /api/albums` if missing, cache the ID). Add all new RAF asset IDs with `PUT /api/albums/{albumId}/assets`, body `{"ids": [...]}`, in one call.
+7. **Report.** Log a summary: files copied, pairs stacked, RAFs added to album, and any unpaired files.
+
+### Idempotency
+
+The app must be safe to re-run on the same card or after a crash at any step:
+
+- Copy skips files already present.
+- Tag upsert and adding assets that already carry the tag are harmless.
+- Stacking skips already-stacked assets.
+- Album add tolerates assets already in the album (the API reports them as duplicates rather than failing, **verify**).
+
+### Edge cases
+
+- **Unpaired files** (JPEG without RAF, or the reverse, e.g. camera set to JPEG-only for some shots): import, tag, log. Do not stack. Unpaired RAFs still go into the RAW album.
+- **Counter rollover** (`DSCF9999` → `DSCF0001`): pairs are matched within one date folder, so stems only need to be unique per day.
+- **Scan timeout:** leave files in place, log which assets were not found, and let the next run pick them up (steps 4–6 should also process any earlier files in the library that are missing their tag/stack/album membership).
+
+## Open test before building around stacks
+
+It is not confirmed how Immich displays a RAF that is the non-cover member of a stack when that RAF is also in an album. Test with a single pair first:
+
+- If the RAW album shows the RAFs properly and the timeline shows only the JPEG: keep the flow above.
+- If not: replace stacking in step 5 with archiving the RAF (`PUT /api/assets` with `{"ids": [...], "visibility": "archive"}`; older versions use `isArchived: true`, **verify** for the installed version). Archived assets are hidden from the timeline but still appear in albums and search. Make this a config switch (`RAW_MODE = stack | archive`).
+
+## Out of scope / later
+
+- Rendering darktable edits in Immich. Immich currently ignores development settings in XMP. A possible later addition: a container that runs `darktable-cli` on any RAF whose `.RAF.xmp` changed and writes JPEGs to a separate folder or library (e.g. a separate `data2/fuji-edits` dataset, kept outside `/data2/fuji` so exported JPEGs never get mixed into RAF/JPEG pairing).
+- Off-box backup of `data2/fuji` (ZFS snapshot send to another machine). Handled outside this app.
+- If Immich runs in an LXC on Proxmox, `/data2/fuji` must also be bind-mounted into that container (`pct set <id> -mpX ...`) before the Docker volume line above can see it. Same for wherever this app runs.
+
+---
+
+## Appendix: verification and implementation notes (2026-10-22)
+
+The **verify** items above, checked against the Immich **v3.3.5** OpenAPI spec
+and server source (latest release on 2026-10-22). Recheck after a major upgrade.
+
+| Item | Result |
+|---|---|
+| Scan | `POST /api/libraries/{id}/scan`, no body, 204. Permission `library.update`. |
+| Search filter | `originalPath` exists, but it is a case-insensitive **substring** match (`ilike '%…%'`), not an exact match. The hook searches by day folder plus `libraryId` and compares paths exactly itself. By default the results include timeline and archived assets and stacked children (`withStacked` only filters when `false`), but not locked ones. |
+| `stack` on assets | Search results do **not** include `stack` (only `stackId` internally). The hook reads stack membership from `GET /api/stacks` (all of the user's stacks with their assets) instead. |
+| Re-stacking | `POST /api/stacks` is not harmless to repeat: it deletes any stack whose primary is one of the given assets and creates a new one with the union of their assets. Hence the skip. It requires `asset.update` on the assets. |
+| Tag / album add | `PUT /api/tags/{id}/assets` and `PUT /api/albums/{id}/assets` return per-ID results; assets already present come back as `{"success": false, "error": "duplicate"}`. Confirmed harmless. |
+| Tag upsert | `PUT /api/tags` with `{"tags": ["Camera/X-T30 II"]}` creates the hierarchy and returns the tags; the leaf has `value` equal to the full path. |
+| Archive | `PUT /api/assets` with `{"ids": [...], "visibility": "archive"}`. `isArchived` is a read-only response field now. |
+| Permissions | `library.read`, `library.update`, `asset.read`, `asset.update`, `tag.create`, `tag.asset`, `stack.read`, `stack.create`, `album.read`, `album.create`, `albumAsset.create`. |
+
+How the implementation maps onto the plan:
+
+- **Step 1 is the receiver itself.** The camera pushes over PTP/IP, so there
+  is no card to copy from. `fuji-autosave-receiver --inbox /data2/fuji` writes
+  `YYYY/YYYY-MM-DD/NAME`, keeping the camera's file names. The date comes from
+  the capture date the camera reports for each object, falling back to today's
+  date if it is missing. Partial downloads go to `/data2/fuji/.incoming/NAME.part` (same
+  dataset, so the rename is atomic) rather than into the day folder, and are
+  renamed only after the full size arrived and was fsynced. Add
+  `**/.incoming/**` to the library's exclusion patterns. A file already at its
+  final path with the same size is skipped, even if `seen.tsv` was lost.
+- **Steps 2–7 are `scripts/immich-hook`** (Python 3, stdlib only), run by the
+  receiver after each batch with new files. Steps 4–6 reconcile the **whole
+  library** on every run (tag missing, stack unstacked pairs, add missing RAFs
+  to the album), so files from timed-out or failed runs are caught up
+  automatically. A batch list stays queued until all its files were found.
+- Pairs are files with the same folder and stem (case-insensitive), exactly
+  one `.JPG`/`.JPEG` and one `.RAF`. In `RAW_MODE=archive` only paired RAFs
+  are archived, so a RAW-only shot stays visible in the timeline.
+- Extra settings: `RAW_MODE` (`stack`/`archive`) and `SCAN_TIMEOUT` (seconds,
+  default 900).
