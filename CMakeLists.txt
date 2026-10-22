@@ -23,10 +23,17 @@ add_subdirectory(third_party/libfuji EXCLUDE_FROM_ALL)
 add_executable(fuji-autosave-receiver
     src/main.c
     src/seen.c
+    src/exif.c
 )
 target_compile_definitions(fuji-autosave-receiver PRIVATE _GNU_SOURCE)
 target_compile_options(fuji-autosave-receiver PRIVATE -Wall -Wextra -Wshadow)
 target_link_libraries(fuji-autosave-receiver PRIVATE fuji)
+
+# Test helper for tests/test-exif.sh (not installed)
+add_executable(exif-date tests/exif-date.c src/exif.c)
+target_include_directories(exif-date PRIVATE src)
+target_compile_definitions(exif-date PRIVATE _GNU_SOURCE)
+target_compile_options(exif-date PRIVATE -Wall -Wextra -Wshadow)
 
 install(TARGETS fuji-autosave-receiver RUNTIME DESTINATION bin)
 install(PROGRAMS scripts/immich-hook DESTINATION lib/fuji-autosave)

@@ -94,10 +94,11 @@ grep -q 'session done: 2 new, 0 already seen' "$WORK/recv-1.log" || fail "unexpe
 case $(cat "$WORK/state/hook-saw.arg") in *.list) ;; *) fail "hook got $(cat "$WORK/state/hook-saw.arg"), not a .list";; esac
 [ -z "$(ls "$WORK/state/batches" | grep '\.part$')" ] || fail "batch list left as .part"
 ! grep -q 'socket:' "$WORK/state/hook-saw.fds" || fail "hook inherited sockets: $(grep socket: "$WORK/state/hook-saw.fds")"
-# mtime is the capture time the camera reported (seen.tsv keeps it)
+# mtime is the capture instant the camera reported, in UTC like the real
+# X-T30 II (seen.tsv keeps it)
 for f in DSCF0001.RAF DSCF0002.RAF; do
 	want=$(grep "^$f|" "$WORK/state/seen.tsv" | cut -d'|' -f2)
-	got=$(date -r "$WORK/inbox/$day/$f" +%Y%m%dT%H%M%S)
+	got=$(date -u -r "$WORK/inbox/$day/$f" +%Y%m%dT%H%M%S)
 	[ "$got" = "$want" ] || fail "$f mtime $got, capture time $want"
 done
 

@@ -163,10 +163,10 @@ Unstack the test pair by hand and rerun the hook.
 - **Lightroom Classic** names RAW sidecars `DSCF1234.xmp`. Immich also treats that
   file as the sidecar of `DSCF1234.JPG`, so Lightroom's rating and keywords show up on the
   JPEG. darktable's `DSCF1234.RAF.xmp` only applies to the RAF.
-- **File times.** The receiver sets each file's mtime to the capture time the
-  camera reports. The camera has no time zone setting for this, so the mtime is
-  interpreted in the container's time zone (Alpine LXC: UTC unless
-  `/etc/localtime` is set). Immich takes dates from EXIF, so this only affects
-  `ls`. The hook pairs a JPEG and RAF only if their mtimes are within 2 s, so
-  if you copy files into the library by hand, keep their times (`cp -p`,
-  `rsync -t`).
+- **Dates and file times.** Day folders follow the photo's EXIF date, the
+  camera's own local time. Each file's mtime is the exact capture instant,
+  which the camera reports in UTC. The container's time zone only matters for
+  files without EXIF, and for how `ls` shows times. Alpine uses UTC unless you
+  `apk add tzdata` and link `/etc/localtime`. The hook pairs a JPEG and RAF only
+  if their mtimes are within 2 s, so if you copy files into the library by
+  hand, keep their times (`cp -p`, `rsync -t`).

@@ -130,23 +130,31 @@ How the implementation maps onto the plan:
 - **Step 1 is the receiver itself.** The camera pushes over PTP/IP, so there
   is no card to copy from. The receiver LXC bind-mounts `/data2/fuji` at `/fuji` (so it works the
   same wherever the dataset lives on the host), and `fuji-autosave-receiver --inbox /fuji` writes
-  `YYYY/YYYY-MM-DD/NAME`, keeping the camera's file names. The date comes from
-  the capture date the camera reports for each object, falling back to today's
-  date if it is missing. Partial downloads go to `.incoming/NAME.part` at the library root (same
+  `YYYY/YYYY-MM-DD/NAME`, keeping the camera's file names. As the plan says,
+  the date comes from EXIF `DateTimeOriginal` of the downloaded file (a RAF
+  through its embedded JPEG, `src/exif.c`). That is the camera's local time,
+  which is right even when travelling. Without EXIF the receiver falls back to
+  the capture instant from PTP/IP in its own time zone, then to today.
+  **The capture date in PTP/IP ObjectInfo is UTC** on the X-T30 II: a shot
+  with EXIF `2026:10:22 20:45:28 +02:00` arrives as `20261022T184528`. Using it
+  directly would put shots taken between midnight and 2 a.m. CEST into the previous
+  day's folder. Partial downloads go to `.incoming/NAME.part` at the library root (same
   dataset, so the rename is atomic) rather than into the day folder, and are
   renamed only after the full size arrived and was fsynced. Add
-  `**/.incoming/**` to the library's exclusion patterns. A file already at its
-  final path with the same size is skipped, even if `seen.tsv` was lost.
+  `**/.incoming/**` to the library's exclusion patterns. A file already in the
+  library is skipped, even if `seen.tsv` was lost (see below).
 - **Steps 2–7 are `scripts/immich-hook`** (Python 3, stdlib only), run by the
   receiver after each batch with new files. Steps 4–6 reconcile the **whole
   library** on every run (tag missing, stack unstacked pairs, add missing RAFs
   to the album), so files from timed-out or failed runs are caught up
   automatically. A batch list stays queued until all its files were found.
-- Each file's mtime is the capture time the camera reports. "Already at the
-  destination" means same size **and** same mtime, because size alone doesn't
-  tell shots apart (uncompressed RAFs are all one size, and `DSCF0001` repeats
-  after a counter reset, a second card or a rollover). Such a reused name is
-  saved as `DSCF0001-1.RAF`.
+- Each file's mtime is the capture instant (the UTC PTP date). "Already in
+  the library" means the same name with the same size **and** mtime in the day
+  folder of the UTC date or the day on either side of it. The EXIF folder isn't known
+  before downloading, but local time is within a day of UTC. Size alone
+  doesn't tell shots apart (uncompressed RAFs are all one size, and `DSCF0001`
+  repeats after a counter reset, a second card or a rollover). Such a reused
+  name is saved as `DSCF0001-1.RAF`.
 - Pairs are files with the same folder and stem (case-insensitive), exactly
   one `.JPG`/`.JPEG` and one `.RAF`, whose mtimes are within 2 s of each other.
   This stops two different shots from being stacked when only one of them got

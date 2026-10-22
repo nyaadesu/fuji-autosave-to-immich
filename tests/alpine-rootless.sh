@@ -33,6 +33,7 @@ if [ "${1:-}" = --inside ]; then
 		sh -n packaging/fuji-autosave.initd
 		ip link set lo up # the hook test talks to a fake Immich on 127.0.0.1
 		tests/test-hook.sh
+		tests/test-exif.sh
 		E2E_NO_UNSHARE=1 tests/test-register.sh
 		E2E_NO_UNSHARE=1 tests/e2e-vcam.sh
 	'

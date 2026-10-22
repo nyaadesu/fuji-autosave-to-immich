@@ -18,6 +18,7 @@
 #include <libpict.h>
 #include <fuji.h>
 #include <app.h>
+#include "exif.h"
 #include "seen.h"
 
 #define RETRY_DELAY_SEC 5
@@ -184,25 +185,8 @@ static void sanitize_name(const char *in, char *out, size_t size) {
 	else if (out[0] == '.') out[0] = '_';
 }
 
-// "YYYY/YYYY-MM-DD" from a PTP date like "20261021T153012"; fall back to
-// today's local date
-#define DAY_DIR_LEN 16
-static void day_dir_from_ptp_date(const char *date, char out[DAY_DIR_LEN]) {
-	int ok = strlen(date) >= 8;
-	for (int i = 0; ok && i < 8; i++) {
-		if (date[i] < '0' || date[i] > '9') ok = 0;
-	}
-	if (ok) {
-		snprintf(out, DAY_DIR_LEN, "%.4s/%.4s-%.2s-%.2s", date, date, date + 4, date + 6);
-		return;
-	}
-	time_t now = time(NULL);
-	struct tm tm;
-	localtime_r(&now, &tm);
-	strftime(out, DAY_DIR_LEN, "%Y/%Y-%m-%d", &tm);
-}
-
-// Capture time from a PTP date "YYYYMMDDThhmmss" (camera local time); 0 if malformed
+// Capture instant from a PTP date "YYYYMMDDThhmmss". The X-T30 II reports
+// UTC here (its EXIF holds local time plus offset); 0 if malformed.
 static int capture_time(const char *date, time_t *out) {
 	struct tm tm = {0};
 	if (strlen(date) < 15 || date[8] != 'T'
@@ -210,23 +194,53 @@ static int capture_time(const char *date, time_t *out) {
 				&tm.tm_hour, &tm.tm_min, &tm.tm_sec) != 6) return 0;
 	tm.tm_year -= 1900;
 	tm.tm_mon -= 1;
-	tm.tm_isdst = -1;
-	*out = mktime(&tm);
+	*out = timegm(&tm);
 	return *out != (time_t)-1;
 }
 
-// 1 if the object's final path already holds this shot (e.g. the seen list
-// was lost): same size and, when the camera reports one, the capture time we
-// stamp as mtime. Size alone is not enough: uncompressed RAFs are all the same
-// size, and DSCF0001 repeats after a counter reset or rollover.
-static int already_in_inbox(const struct PtpObjectInfo *oi, const char *name) {
-	char day[DAY_DIR_LEN], path[PATH_MAX];
-	day_dir_from_ptp_date(oi->date_created, day);
-	if (snprintf(path, sizeof(path), "%s/%s/%s", cfg.inbox, day, name) >= (int)sizeof(path)) return 0;
-	struct stat st;
-	if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size != (off_t)oi->compressed_size) return 0;
+#define DAY_DIR_LEN 16
+
+static void day_dir_from_tm(const struct tm *tm, char out[DAY_DIR_LEN]) {
+	strftime(out, DAY_DIR_LEN, "%Y/%Y-%m-%d", tm);
+}
+
+// "YYYY/YYYY-MM-DD" for a downloaded file: the local date in its EXIF (what
+// the camera's clock said, wherever it was), else the PTP capture instant in
+// this machine's time zone, else today
+static void day_dir_for_file(const char *path, const char *ptp_date, char out[DAY_DIR_LEN]) {
+	char date[EXIF_DATE_LEN];
+	if (exif_capture_date(path, date) == 0) {
+		snprintf(out, DAY_DIR_LEN, "%.4s/%s", date, date);
+		return;
+	}
 	time_t t;
-	return !capture_time(oi->date_created, &t) || st.st_mtime == t;
+	if (!capture_time(ptp_date, &t)) t = time(NULL);
+	struct tm tm;
+	localtime_r(&t, &tm);
+	day_dir_from_tm(&tm, out);
+}
+
+// 1 if the inbox already holds this shot (e.g. the seen list was lost): same
+// name, size and mtime (the capture instant we stamp). Size alone is not
+// enough: uncompressed RAFs are all the same size, and DSCF0001 repeats after
+// a counter reset or rollover. The day folder comes from EXIF, which is only
+// known after downloading, so check the days around the UTC capture date
+// (local time is within -12..+14 h of it).
+static int already_in_inbox(const struct PtpObjectInfo *oi, const char *name) {
+	time_t t;
+	if (!capture_time(oi->date_created, &t)) return 0;
+	for (int k = -1; k <= 1; k++) {
+		time_t day_t = t + k * 86400;
+		struct tm tm;
+		gmtime_r(&day_t, &tm);
+		char day[DAY_DIR_LEN], path[PATH_MAX];
+		day_dir_from_tm(&tm, day);
+		if (snprintf(path, sizeof(path), "%s/%s/%s", cfg.inbox, day, name) >= (int)sizeof(path)) continue;
+		struct stat st;
+		if (stat(path, &st) == 0 && S_ISREG(st.st_mode)
+				&& st.st_size == (off_t)oi->compressed_size && st.st_mtime == t) return 1;
+	}
+	return 0;
 }
 
 // Pick <dir>/<name>, or <dir>/<stem>-N<ext> if that is taken
@@ -408,7 +422,7 @@ static int download_one(struct PtpRuntime *r, int handle, const struct PtpObject
 	}
 
 	char day[DAY_DIR_LEN], dir[PATH_MAX], final[PATH_MAX];
-	day_dir_from_ptp_date(oi->date_created, day);
+	day_dir_for_file(part, oi->date_created, day);
 	snprintf(dir, sizeof(dir), "%s/%s", cfg.inbox, day);
 	if (mkdir_p(dir) || unique_path(dir, name, final, sizeof(final))) {
 		log_err("cannot place %s in %s", name, dir);

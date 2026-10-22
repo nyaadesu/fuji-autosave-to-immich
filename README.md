@@ -42,9 +42,10 @@ only goes to the smartphone app.
    opens a PTP/IP session to the camera on TCP 55740.
 4. The camera offers objects 1..N. For each one the daemon reads its object
    info and skips it if `filename|date|size` is already in `seen.tsv`, or if
-   a file of that name and size is already at its destination.
-   Otherwise it downloads to `.incoming/NAME.part`, fsyncs, and renames into
-   `YYYY/YYYY-MM-DD/` (the date the camera recorded the shot). Files are never
+   the same shot (name, size, capture time) is already in the inbox.
+   Otherwise it downloads to `.incoming/NAME.part`, sets its mtime to the
+   capture time, fsyncs, and renames into `YYYY/YYYY-MM-DD/` (the shot's EXIF
+   date, i.e. the camera's local date; the PTP/IP date is UTC). Files are never
    moved or changed after that, since Immich would treat a moved file as a new asset.
 5. After the session it starts the hook with a list of the new files.
    `scripts/immich-hook` asks Immich to scan the library and waits until every
@@ -125,6 +126,7 @@ client in "wireless communication" mode (not implemented here).
 
 ```sh
 tests/test-hook.sh        # immich-hook against a fake Immich API (tests/fake-immich.py)
+tests/test-exif.sh        # EXIF capture dates (src/exif.c): JPEG, RAF, malformed and fuzzed input
 tests/test-register.sh    # registration against a scripted camera (quoted model name)
 tests/e2e-vcam.sh         # receiver vs. emulated camera, in a private network namespace
 tests/alpine-rootless.sh  # all of the above, built and run on Alpine (musl, busybox)
