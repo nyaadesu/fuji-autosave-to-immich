@@ -5,4 +5,4 @@
 [submodule "third_party/libpict"]
 	path = third_party/libpict
 	url = https://github.com/nyaadesu/libpict
-	branch = fix-close-leaks-avail-no-usb
+	branch = fuji-autosave

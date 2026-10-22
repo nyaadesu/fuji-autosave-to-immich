@@ -162,7 +162,7 @@ a rootless chroot, so it needs no Docker.
   | Submodule | Fork branch | Upstream PRs |
   | --- | --- | --- |
   | `third_party/libfuji` | [nyaadesu/libfuji `discovery-and-reset-fixes`](https://github.com/nyaadesu/libfuji/tree/discovery-and-reset-fixes) | [#8](https://github.com/petabyt/libfuji/pull/8) (quoted model names), [#9](https://github.com/petabyt/libfuji/pull/9) (reset leak, socket leaks, `strncpy`) |
-  | `third_party/libpict` | [nyaadesu/libpict `fix-close-leaks-avail-no-usb`](https://github.com/nyaadesu/libpict/tree/fix-close-leaks-avail-no-usb) | [#21](https://github.com/petabyt/libpict/pull/21) (heap overflow, `ptp_close` leaks, `PTP_NO_USB`) |
+  | `third_party/libpict` | [nyaadesu/libpict `fuji-autosave`](https://github.com/nyaadesu/libpict/tree/fuji-autosave) (the two PR branches combined) | [#21](https://github.com/petabyt/libpict/pull/21) (heap overflow, `ptp_close` leaks, `PTP_NO_USB`), [#22](https://github.com/petabyt/libpict/pull/22) (socket leak on connect timeout) |
 
   The libfuji branch also has fixes not yet sent upstream: two out-of-bounds
   writes in discovery, line-based parsing of the tether and DISCOVER headers,
@@ -171,6 +171,8 @@ a rootless chroot, so it needs no Docker.
   everything is merged, point both submodules back at petabyt's repos.
   `src/main.c`'s `free_runtime()` relies on the fixed `ptp_close()` freeing
   libpict's state; with an unfixed libpict it leaks about 100 bytes per session.
+  The connect retry in `run_session()` relies on #22; without it, each timed-out
+  attempt leaks a socket.
 
 ## Ideas
 
