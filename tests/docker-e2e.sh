@@ -84,11 +84,17 @@ done
 docker logs "$NET-recv" > "$T/recv.log" 2>&1
 
 grep -q 'session done: 2 new, 0 already seen' "$T/recv.log" || fail "unexpected session summary"
-for f in DSCF0001.RAF DSCF0002.RAF; do
-	got=$(find "$T/lib" -path "*/[0-9][0-9][0-9][0-9]/[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]/$f")
-	[ -n "$got" ] || fail "$f not in a YYYY/YYYY-MM-DD folder"
-	cmp -s "$got" "$T/sd/DCIM/100_FUJI/$f" || fail "$f corrupt"
-	[ "$(stat -c %u "$got")" = 1000 ] || fail "$f not owned by uid 1000"
+# vcam offers its files in directory order, which depends on the filesystem,
+# and never the last one: check the two the receiver saved
+saved=$(sed -n 's|^saved /fuji/\([^ ]*\) .*|\1|p' "$T/recv.log")
+[ "$(echo "$saved" | wc -l)" -eq 2 ] || fail "expected 2 saved files, got: $saved"
+raws=0
+for rel in $saved; do
+	echo "$rel" | grep -q -E '^[0-9]{4}/[0-9]{4}-[0-9]{2}-[0-9]{2}/DSCF[0-9]{4}\.(JPG|RAF)$' \
+		|| fail "$rel not in a YYYY/YYYY-MM-DD folder"
+	cmp -s "$T/lib/$rel" "$T/sd/DCIM/100_FUJI/${rel##*/}" || fail "$rel corrupt"
+	[ "$(stat -c %u "$T/lib/$rel")" = 1000 ] || fail "$rel not owned by uid 1000"
+	case $rel in *.RAF) raws=$((raws + 1)) ;; esac
 done
 grep -q 'immich-hook: done: 2 new file(s) found, 0 still missing' "$T/recv.log" || fail "hook did not finish the batch"
 
@@ -100,7 +106,7 @@ s = json.load(urllib.request.urlopen(req))
 print(eval(sys.argv[1]))' "$1"
 }
 [ "$(state 'len(s["tags"].get("Camera/X-T4", []))')" = 2 ] || fail "files not tagged Camera/X-T4: $(state 's["tags"]')"
-[ "$(state 'len(s["albums"].get("Fuji RAW", []))')" = 2 ] || fail "RAFs not in the RAW album: $(state 's["albums"]')"
+[ "$(state 'len(s["albums"].get("Fuji RAW", []))')" = "$raws" ] || fail "RAFs not in the RAW album: $(state 's["albums"]')"
 [ -f "$T/state/library.json" ] && [ -f "$T/state/seen.tsv" ] || fail "state not written to the state volume"
 
 echo "docker: all checks passed"
