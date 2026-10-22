@@ -2,11 +2,11 @@
 """Post-batch hook for fuji-autosave-receiver: Immich external library flow.
 
 The receiver writes straight into the external library root
-(PHOTO_ROOT_HOST, e.g. /data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF). This hook:
+(PHOTO_ROOT_HOST, e.g. /fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF). This hook:
 
   1. asks Immich to scan the library,
   2. waits until every file of the pending batches has an asset,
-  3. tags every library asset with CAMERA_TAG,
+  3. tags every library asset with its camera, "Camera/<model>",
   4. stacks each JPEG+RAF pair (JPEG as cover), or with RAW_MODE=archive
      archives the paired RAF instead,
   5. adds every RAF to the RAW_ALBUM_NAME album,
@@ -22,10 +22,15 @@ Settings come from the environment and from $FUJI_ENV_FILE
   IMMICH_URL            e.g. http://immich.lan:2283 (a trailing /api is fine)
   IMMICH_API_KEY        API key of the library's owner
   LIBRARY_ID            external library UUID
-  PHOTO_ROOT_HOST       library root as this hook sees it (default $FUJI_INBOX)
+  PHOTO_ROOT_HOST       library root as this hook sees it (default $FUJI_INBOX,
+                        else /fuji)
   PHOTO_ROOT_CONTAINER  the same root as Immich sees it (e.g. /mnt/fuji)
   RAW_ALBUM_NAME        default "Fuji RAW"
-  CAMERA_TAG            default "Camera/X-T30 II"
+  CAMERA_TAG_PREFIX     default "Camera/"; the tag is prefix + camera model,
+                        taken from the asset's EXIF Model, or for files of
+                        this batch whose EXIF Immich hasn't read yet, from the
+                        model the camera reported (FUJI_CAMERA_MODEL)
+  CAMERA_TAG            one fixed tag for every asset instead (optional)
   RAW_MODE              stack (default) or archive
   SCAN_TIMEOUT          seconds to wait for new assets (default 900)
 
@@ -82,9 +87,7 @@ def config():
     load_env_file(os.environ.get("FUJI_ENV_FILE", "/etc/fuji-autosave/env"))
     env = os.environ
     missing = [k for k in ("IMMICH_URL", "IMMICH_API_KEY", "LIBRARY_ID", "PHOTO_ROOT_CONTAINER") if not env.get(k)]
-    host_root = env.get("PHOTO_ROOT_HOST") or env.get("FUJI_INBOX")
-    if not host_root:
-        missing.append("PHOTO_ROOT_HOST (or FUJI_INBOX)")
+    host_root = env.get("PHOTO_ROOT_HOST") or env.get("FUJI_INBOX") or "/fuji"
     if missing:
         raise Fail("not set: " + ", ".join(missing))
     url = env["IMMICH_URL"].rstrip("/")
@@ -104,7 +107,9 @@ def config():
         "host_root": os.path.normpath(host_root),
         "container_root": posixpath.normpath(env["PHOTO_ROOT_CONTAINER"]),
         "album": env.get("RAW_ALBUM_NAME") or "Fuji RAW",
-        "tag": env.get("CAMERA_TAG") or "Camera/X-T30 II",
+        "tag": env.get("CAMERA_TAG") or None,
+        "tag_prefix": env.get("CAMERA_TAG_PREFIX") or "Camera/",
+        "session_model": (env.get("FUJI_CAMERA_MODEL") or "").strip(),
         "mode": mode,
         "timeout": timeout,
         "state_dir": env.get("FUJI_STATE_DIR") or "/var/lib/fuji-autosave",
@@ -210,12 +215,46 @@ def wait_for_assets(immich, cfg, wanted):
 
 # Reconcile the whole library
 
-def ensure_tag(immich, name):
-    tags = immich.call("PUT", "/tags", {"tags": [name]})
-    for t in tags:
-        if t.get("value") == name:
-            return t["id"]
-    raise Fail(f"tag upsert did not return {name!r}")
+def tag_assets(immich, cfg, assets, new_paths):
+    """Tag every untagged asset with its camera; return (newly tagged, model unknown)."""
+    lib = cfg["library"]
+    if cfg["tag"]:
+        is_camera_tag = lambda value: value == cfg["tag"]
+    else:
+        is_camera_tag = lambda value: value.startswith(cfg["tag_prefix"])
+    tagged = set()
+    for t in immich.call("GET", "/tags"):
+        if is_camera_tag(t["value"]):
+            tagged.update(a["id"] for a in immich.search(libraryId=lib, tagIds=[t["id"]]))
+    todo = [a for a in assets if a["id"] not in tagged]
+    if not todo:
+        return 0, 0
+
+    wanted = {}  # tag value -> asset ids
+    unknown = 0
+    if cfg["tag"]:
+        wanted[cfg["tag"]] = [a["id"] for a in todo]
+    else:
+        # withExif is an inner join: assets whose metadata isn't extracted yet are left out
+        models = {a["id"]: ((a.get("exifInfo") or {}).get("model") or "").strip()
+                  for a in immich.search(libraryId=lib, withExif=True)}
+        for a in todo:
+            model = models.get(a["id"]) or (cfg["session_model"] if a["originalPath"] in new_paths else "")
+            if not model:
+                unknown += 1
+                continue
+            wanted.setdefault(cfg["tag_prefix"] + model.replace("/", "-"), []).append(a["id"])
+    if not wanted:
+        return 0, unknown
+
+    ids = {t["value"]: t["id"] for t in immich.call("PUT", "/tags", {"tags": sorted(wanted)})}
+    added = 0
+    for value, asset_ids in sorted(wanted.items()):
+        if value not in ids:
+            raise Fail(f"tag upsert did not return {value!r}")
+        added += add_all(immich, f"/tags/{ids[value]}/assets", asset_ids)
+        log(f"tag {value!r}: {len(asset_ids)} asset(s)")
+    return added, unknown
 
 
 def ensure_album(immich, name):
@@ -244,10 +283,10 @@ def reconcile(immich, cfg, new_paths):
     by_path = {a["originalPath"]: a for a in assets}
     stats = {"assets": len(assets)}
 
-    # Tag every asset from the camera
-    tag_id = ensure_tag(immich, cfg["tag"])
-    tagged = {a["id"] for a in immich.search(libraryId=cfg["library"], tagIds=[tag_id])}
-    stats["tagged"] = add_all(immich, f"/tags/{tag_id}/assets", [a["id"] for a in assets if a["id"] not in tagged])
+    # Tag every asset with the camera it came from
+    stats["tagged"], unknown = tag_assets(immich, cfg, assets, new_paths)
+    if unknown:
+        log(f"{unknown} asset(s) not tagged yet: Immich has no camera model for them; a later run will")
 
     # Pair JPEG and RAF by folder + stem
     groups = {}

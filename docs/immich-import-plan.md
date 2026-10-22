@@ -123,15 +123,16 @@ and server source (latest release on 2026-10-22). Recheck after a major upgrade.
 | Tag / album add | `PUT /api/tags/{id}/assets` and `PUT /api/albums/{id}/assets` return per-ID results; assets already present come back as `{"success": false, "error": "duplicate"}`. Confirmed harmless. |
 | Tag upsert | `PUT /api/tags` with `{"tags": ["Camera/X-T30 II"]}` creates the hierarchy and returns the tags; the leaf has `value` equal to the full path. |
 | Archive | `PUT /api/assets` with `{"ids": [...], "visibility": "archive"}`. `isArchived` is a read-only response field now. |
-| Permissions | `library.read`, `library.update`, `asset.read`, `asset.update`, `tag.create`, `tag.asset`, `stack.read`, `stack.create`, `album.read`, `album.create`, `albumAsset.create`. |
+| Permissions | `library.read`, `library.update`, `asset.read`, `asset.update`, `tag.read`, `tag.create`, `tag.asset`, `stack.read`, `stack.create`, `album.read`, `album.create`, `albumAsset.create`. |
 
 How the implementation maps onto the plan:
 
 - **Step 1 is the receiver itself.** The camera pushes over PTP/IP, so there
-  is no card to copy from. `fuji-autosave-receiver --inbox /data2/fuji` writes
+  is no card to copy from. The receiver LXC bind-mounts `/data2/fuji` at `/fuji` (so it works the
+  same wherever the dataset lives on the host), and `fuji-autosave-receiver --inbox /fuji` writes
   `YYYY/YYYY-MM-DD/NAME`, keeping the camera's file names. The date comes from
   the capture date the camera reports for each object, falling back to today's
-  date if it is missing. Partial downloads go to `/data2/fuji/.incoming/NAME.part` (same
+  date if it is missing. Partial downloads go to `.incoming/NAME.part` at the library root (same
   dataset, so the rename is atomic) rather than into the day folder, and are
   renamed only after the full size arrived and was fsynced. Add
   `**/.incoming/**` to the library's exclusion patterns. A file already at its
@@ -144,5 +145,14 @@ How the implementation maps onto the plan:
 - Pairs are files with the same folder and stem (case-insensitive), exactly
   one `.JPG`/`.JPEG` and one `.RAF`. In `RAW_MODE=archive` only paired RAFs
   are archived, so a RAW-only shot stays visible in the timeline.
+- The tag is not hardcoded: each asset gets `CAMERA_TAG_PREFIX` (default
+  `Camera/`) + its camera model. The model is Immich's EXIF `Model` for the
+  asset; for files in the current batch whose EXIF Immich hasn't extracted yet,
+  it is the model the camera reported in the PTP/IP session
+  (`FUJI_CAMERA_MODEL`). An asset with neither stays untagged until a later run.
+  Any `Camera/…` tag counts as tagged. Setting `CAMERA_TAG` restores one fixed
+  tag. Note `search/metadata` with `withExif: true` is an inner join, so the
+  hook only uses it to look up models, never to list assets. Listing tags needs
+  `tag.read`.
 - Extra settings: `RAW_MODE` (`stack`/`archive`) and `SCAN_TIMEOUT` (seconds,
   default 900).

@@ -53,13 +53,14 @@ print(eval(sys.argv[2]))' "$IMMICH_URL" "$1"
 
 hook() { "$HERE/scripts/immich-hook" "$@" 2>> "$T/hook.log"; }
 
-export FUJI_STATE_DIR="$T/state" FUJI_INBOX="$T/lib" FUJI_CAMERA_NAME=VCAM
+# As the receiver sets them; the model is what the camera reported this session
+export FUJI_STATE_DIR="$T/state" FUJI_INBOX="$T/lib" FUJI_CAMERA_NAME=VCAM FUJI_CAMERA_MODEL="X-T30 II"
 export IMMICH_API_KEY=test-key LIBRARY_ID=11111111-1111-4111-8111-111111111111
 export PHOTO_ROOT_CONTAINER=/mnt/fuji SCAN_TIMEOUT=20
 # Settings file: its values apply unless the environment already sets them
 cat > "$T/env" <<'EOF'
 RAW_ALBUM_NAME="Fuji RAW"
-CAMERA_TAG='Camera/X-T30 II'
+CAMERA_TAG_PREFIX='Camera/'
 RAW_MODE=stack
 LIBRARY_ID=from-env-file-must-not-win
 EOF
@@ -115,5 +116,25 @@ RAW_MODE=archive hook || fail "archive run failed"
 [ "$(state 's["assets"]["'$M/$D1/DSCF0020.JPG'"]["visibility"]')" = timeline ] || fail "JPEG archived"
 [ "$(state 'len(s["stacks"])')" = 0 ] || fail "archive mode stacked"
 [ "$(state 'len(s["albums"]["Fuji RAW"])')" = 2 ] || fail "archive mode RAW album wrong"
+
+# 6. Camera tag from EXIF: a run without a session model (by hand) tags files
+#    by their EXIF Model; one without EXIF yet waits for a later run, which
+#    uses the session's model if the file is in its batch
+export FAKE_EXIF='DSCF0030:X-H2'
+setup
+unset FAKE_EXIF
+batch b6 $D1/DSCF0030.JPG $D1/DSCF0031.JPG
+FUJI_CAMERA_MODEL= hook || fail "run without a session model failed"
+[ "$(state 's["tags"]["Camera/X-H2"]')" = "['$M/$D1/DSCF0030.JPG']" ] || fail "EXIF model not used: $(state 's["tags"]')"
+[ "$(state 'sum(len(v) for v in s["tags"].values())')" = 1 ] || fail "file without a model got tagged"
+grep -q '1 asset(s) not tagged yet' "$T/hook.log" || fail "untagged file not reported"
+batch b7 $D1/DSCF0031.JPG
+hook || fail "run with a session model failed"
+[ "$(state 's["tags"]["Camera/X-T30 II"]')" = "['$M/$D1/DSCF0031.JPG']" ] || fail "session model not used: $(state 's["tags"]')"
+[ "$(state 'len(s["tags"]["Camera/X-H2"])')" = 1 ] || fail "EXIF-tagged file retagged"
+
+# 7. A fixed CAMERA_TAG overrides the per-camera tags
+CAMERA_TAG=Fuji hook || fail "fixed tag run failed"
+[ "$(state 'len(s["tags"]["Fuji"])')" = 2 ] || fail "fixed CAMERA_TAG not applied"
 
 echo "immich-hook: all checks passed"

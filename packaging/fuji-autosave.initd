@@ -4,7 +4,7 @@
 description="FUJIFILM PC AutoSave receiver"
 
 : "${FUJI_USER:=fuji}"
-: "${FUJI_INBOX:=/data2/fuji}"
+: "${FUJI_INBOX:=/fuji}"
 : "${FUJI_STATE_DIR:=/var/lib/fuji-autosave}"
 : "${FUJI_CLIENT_NAME:=fuji-inbox}"
 : "${FUJI_UMASK:=022}"

@@ -4,7 +4,7 @@
 # Name the camera shows in its PC AutoSave list (1-24 characters)
 #FUJI_CLIENT_NAME=fuji-inbox
 # The Immich external library root, bind-mounted into this container
-#FUJI_INBOX=/data2/fuji
+#FUJI_INBOX=/fuji
 #FUJI_STATE_DIR=/var/lib/fuji-autosave
 #FUJI_USER=fuji
 # 002 makes new folders and files group-writable, so an SMB editing group can

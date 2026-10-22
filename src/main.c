@@ -40,7 +40,7 @@ struct Batch {
 };
 
 static struct Config cfg = {
-	.inbox = "/srv/fuji-inbox",
+	.inbox = "/fuji",
 	.state_dir = "/var/lib/fuji-autosave",
 	.client_name = "fuji-inbox",
 };

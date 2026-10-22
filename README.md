@@ -48,7 +48,7 @@ only goes to the smartphone app.
    moved or changed after that, since Immich would treat a moved file as a new asset.
 5. After the session it starts the hook with a list of the new files.
    `scripts/immich-hook` asks Immich to scan the library and waits until every
-   new file has an asset. It then tags all assets with `CAMERA_TAG`, stacks each
+   new file has an asset. It then tags each asset `Camera/<model>` (the model the camera reports, or the EXIF Model), stacks each
    `DSCFnnnn.JPG` + `DSCFnnnn.RAF` pair (JPEG on top; or archives the RAF with
    `RAW_MODE=archive`) and adds every RAF to the `RAW_ALBUM_NAME` album. Steps
    that already happened are skipped, and the hook works over the whole library, so a
@@ -76,13 +76,13 @@ and musl alike.
 ## Run
 
 ```sh
-fuji-autosave-receiver --inbox /data2/fuji --state-dir /var/lib/fuji-autosave \
+fuji-autosave-receiver --inbox /fuji --state-dir /var/lib/fuji-autosave \
     --name fuji-inbox --hook /usr/local/lib/fuji-autosave/immich-hook
 ```
 
 | Option | Meaning |
 | --- | --- |
-| `-i, --inbox DIR` | where files land (default `/srv/fuji-inbox`) |
+| `-i, --inbox DIR` | where files land (default `/fuji`) |
 | `-s, --state-dir DIR` | `seen.tsv` and pending batch lists (default `/var/lib/fuji-autosave`) |
 | `-n, --name NAME` | name the camera shows for this "PC", 1–24 chars |
 | `-x, --hook PATH` | run `PATH <batch-list>` after each batch with new files |

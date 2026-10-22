@@ -6,8 +6,11 @@
 Writes its port to STATE_DIR/port and every request to STATE_DIR/calls.log.
 A library scan indexes the media files under HOST_ROOT as CONTAINER_ROOT paths,
 but only on the FAKE_SCAN_POLLS-th search after it (scans are asynchronous in
-Immich). Files whose name contains FAKE_HIDE are never indexed. Behaviour
-copied from Immich v3.3.5: originalPath is a substring match, bulk adds report
+Immich). Files whose name contains FAKE_HIDE are never indexed.
+FAKE_EXIF="DSCF0030:X-H2;DSCF0031:X-T5" gives files whose name contains the
+key an EXIF Model; all others look like metadata extraction hasn't run yet.
+Behaviour copied from Immich v3.3.5: originalPath is a substring match,
+withExif is an inner join (assets without EXIF are left out), bulk adds report
 existing members as "duplicate", and creating a stack replaces any stack whose
 primary asset is one of the given assets.
 """
@@ -25,12 +28,14 @@ API_KEY = "test-key"
 SCAN_POLLS = int(os.environ.get("FAKE_SCAN_POLLS", "2"))
 HIDE = os.environ.get("FAKE_HIDE", "")
 MEDIA = {".jpg", ".jpeg", ".raf"}
+EXIF = dict(kv.split(":", 1) for kv in os.environ.get("FAKE_EXIF", "").split(";") if kv)
 
 assets = {}       # id -> asset
 tags = {}         # value -> {id, value, name}
 tag_assets = {}   # tag id -> set(asset id)
 albums = {}       # id -> {id, albumName, assets:set}
 stacks = {}       # id -> {id, primaryAssetId, assets:[ids]}
+exif = {}         # asset id -> exifInfo, once "extracted"
 scan_pending = None
 
 
@@ -51,6 +56,9 @@ def index_library():
             i = new_id()
             assets[i] = {"id": i, "originalPath": path, "originalFileName": f, "libraryId": LIBRARY_ID,
                          "visibility": "timeline", "isOffline": False, "stackId": None}
+            for key, model in EXIF.items():
+                if key in f:
+                    exif[i] = {"make": "FUJIFILM", "model": model}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -101,6 +109,8 @@ class Handler(BaseHTTPRequestHandler):
                 items = [a for a in items if a["visibility"] == body["visibility"]]
             else:
                 items = [a for a in items if a["visibility"] != "locked"]
+            if body.get("withExif"):
+                items = [dict(a, exifInfo=exif[a["id"]]) for a in items if a["id"] in exif]
             items.sort(key=lambda a: a["originalPath"])
             page, size = body.get("page", 1), body.get("size", 250)
             chunk = items[(page - 1) * size:page * size]
@@ -108,11 +118,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {"albums": {"items": [], "total": 0, "count": 0},
                                     "assets": {"items": chunk, "total": len(chunk), "count": len(chunk),
                                                "nextPage": str(page + 1) if more else None}})
+        if method == "GET" and p == "/api/tags":
+            return self.reply(200, list(tags.values()))
         if method == "PUT" and p == "/api/tags":
             out = []
             for value in body["tags"]:
-                if value not in tags:
-                    tags[value] = {"id": new_id(), "value": value, "name": value.split("/")[-1]}
+                # "A/B" also creates the parent "A", as Immich does
+                parts = value.split("/")
+                for n in range(1, len(parts) + 1):
+                    v = "/".join(parts[:n])
+                    if v not in tags:
+                        tags[v] = {"id": new_id(), "value": v, "name": parts[n - 1]}
                 out.append(tags[value])
             return self.reply(200, out)
         m = re.fullmatch(r"/api/(tags|albums)/([^/]+)/assets", p)

@@ -15,7 +15,7 @@ and bridge `vmbr0` with yours. See [immich-import-plan.md](immich-import-plan.md
 for the design.
 
 ```
-host /data2/fuji ──bind──> receiver LXC /data2/fuji   (read-write, --inbox)
+host /data2/fuji ──bind──> receiver LXC /fuji         (read-write, --inbox)
                  ──bind──> immich-server  /mnt/fuji    (read-only, library import path)
                  ──SMB───> darktable / Lightroom       (edit in place, .RAF.xmp sidecars)
 ```
@@ -36,7 +36,7 @@ pveam update && pveam available | grep alpine     # download the current one wit
 pct create 140 local:vztmpl/alpine-3.24-default_20260601_amd64.tar.xz \
     --hostname fuji-autosave --unprivileged 1 --cores 1 --memory 512 \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp --rootfs local-zfs:4 --onboot 1
-pct set 140 -mp0 /data2/fuji,mp=/data2/fuji
+pct set 140 -mp0 /data2/fuji,mp=/fuji    # the container only ever sees /fuji
 pct start 140
 
 # Reserve Fuji's ports from the ephemeral range (see packaging/90-fuji-autosave.conf).
@@ -82,7 +82,7 @@ Then, in the Immich web UI:
    `curl -H "x-api-key: $KEY" http://immich.lan:2283/api/libraries`).
 2. Account Settings → API Keys → New API key, as that same user, with these
    permissions: `library.read`, `library.update`, `asset.read`, `asset.update`,
-   `tag.create`, `tag.asset`, `stack.read`, `stack.create`, `album.read`,
+   `tag.read`, `tag.create`, `tag.asset`, `stack.read`, `stack.create`, `album.read`,
    `album.create`, `albumAsset.create`. (Checked against Immich v3.3.5;
    `asset.update` is also needed to stack.)
 3. Account Settings → Features: enable Tags if it is off.
