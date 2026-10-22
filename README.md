@@ -22,7 +22,7 @@ specific to that body.
 | PTP/IP session, RAF/JPG download, skip repeats, hook | Tested against vcam (`tests/e2e-vcam.sh`) |
 | Immich external-library hook | Tested against a fake Immich API modelled on v3.3.5 (`tests/test-hook.sh`); not yet run against a real Immich |
 | Alpine 3.24 (musl, busybox) | All of the above pass (`tests/alpine-rootless.sh`) |
-| A real X-T30 II (firmware 2.06) | Works: registered, then a 38-file RAW+JPEG batch (991 MB) arrived intact at ~1.9 MB/s. Again on 2026-10-22 with the library layout: 40 files (993 MB) into `YYYY/YYYY-MM-DD/` with capture-time mtimes, the hook got the batch and `X-T30 II`; the immich-hook then stacked all 20 pairs against the fake API. With `seen.tsv` deleted, the next session recognised all 40 files on disk and downloaded nothing. One PTP/IP connect timed out once and worked on retry |
+| A real X-T30 II (firmware 2.06) | Works: registered, then a 38-file RAW+JPEG batch (991 MB) arrived intact at ~1.9 MB/s. Again on 2026-10-22 with the library layout: 40 files (993 MB) into `YYYY/YYYY-MM-DD/` with capture-time mtimes, the hook got the batch and `X-T30 II`; the immich-hook then stacked all 20 pairs against the fake API. With `seen.tsv` deleted, the next session recognised all 40 files on disk and downloaded nothing. One PTP/IP connect timed out once and worked on retry. A fresh shot then showed the PTP/IP capture date is UTC; with day folders from EXIF it landed in the right folder with mtime = EXIF time |
 
 On the X-T30 II, the camera offers the images it considers not yet AutoSaved,
 and the transfer leaves the originals on the card. The camera does not mark
