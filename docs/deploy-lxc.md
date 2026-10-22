@@ -1,5 +1,8 @@
 # Deploying in an Alpine LXC
 
+> The Docker image ([deploy-docker.md](deploy-docker.md)) is the simpler way
+> to install and update. This page is the manual alternative without Docker.
+
 The setup: an unprivileged **Alpine** LXC bridged onto the LAN runs the
 receiver as an OpenRC service. The ZFS dataset `data2/fuji` is bind-mounted
 into it, and the receiver writes the camera's files straight into it. Immich

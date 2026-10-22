@@ -263,7 +263,9 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_any("PUT")
 
 
-server = HTTPServer(("127.0.0.1", 0), Handler)
+# FAKE_LISTEN="0.0.0.0:2283" for tests where another container calls in
+host, _, port = os.environ.get("FAKE_LISTEN", "127.0.0.1:0").rpartition(":")
+server = HTTPServer((host, int(port)), Handler)
 with open(os.path.join(STATE, "port.tmp"), "w") as f:
     f.write(str(server.server_address[1]))
 os.rename(os.path.join(STATE, "port.tmp"), os.path.join(STATE, "port"))

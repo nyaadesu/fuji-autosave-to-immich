@@ -1,0 +1,59 @@
+# fuji-autosave on the Docker host that runs Immich (see docs/deploy-docker.md).
+# All settings are below; only the API key lives in .env next to this file:
+#
+#   echo 'IMMICH_API_KEY=...' > .env && chmod 600 .env
+#   docker compose run --rm fuji-autosave check
+#   docker compose up -d && docker compose logs -f
+
+services:
+  fuji-autosave:
+    image: ghcr.io/nyaadesu/fuji-autosave-to-immich:latest
+    build: .
+    container_name: fuji-autosave
+    # The camera finds the receiver by UDP broadcast and connects back to it,
+    # so it needs the host's LAN address: host networking (or macvlan)
+    network_mode: host
+    restart: unless-stopped
+    # Owner of the files it writes; match the dataset's owner / your SMB user
+    user: "1000:1000"
+    volumes:
+      # Read-write here; immich-server mounts the same dataset read-only
+      - /data2/fuji:/fuji
+      # seen.tsv, batch lists, library.json
+      - /data2/config/fuji-autosave:/var/lib/fuji-autosave
+    environment:
+      # --- Receiver ---
+      # Name the camera shows in its PC AutoSave list (1-24 characters)
+      FUJI_CLIENT_NAME: fuji-inbox
+      # 002: new folders/files group-writable for an SMB editing group
+      FUJI_UMASK: "022"
+      # e.g. --verbose
+      FUJI_EXTRA_ARGS: ""
+      # Empty: only receive files, no Immich step
+      # FUJI_HOOK: ""
+
+      # --- Immich ---
+      # With host networking, Immich's published port is on localhost
+      IMMICH_URL: http://127.0.0.1:2283
+      IMMICH_API_KEY: ${IMMICH_API_KEY:?put IMMICH_API_KEY=... in .env next to compose.yaml}
+      # External library UUID (Administration → External Libraries)
+      LIBRARY_ID: 00000000-0000-0000-0000-000000000000
+      # The library root as immich-server sees it (its import path)
+      PHOTO_ROOT_CONTAINER: /mnt/fuji
+
+      # --- What the hook does ---
+      RAW_ALBUM_NAME: Fuji RAW
+      # Each file is tagged <prefix><camera model>, e.g. "Camera/X-T30 II"
+      CAMERA_TAG_PREFIX: Camera/
+      # ...or one fixed tag for everything instead
+      # CAMERA_TAG: Fuji
+      # stack: RAF stacked under its JPEG; archive: paired RAFs archived
+      RAW_MODE: stack
+      # Seconds to wait for Immich to index a batch
+      SCAN_TIMEOUT: "900"
+      # Delete a file (and its darktable .xmp) once its photo is deleted for good
+      # in Immich; more than DELETE_LIMIT in one run stops the hook instead
+      DELETE_REMOVED: "1"
+      DELETE_LIMIT: "50"
+    # A hook still waiting for an Immich scan gets time to finish
+    stop_grace_period: 5m

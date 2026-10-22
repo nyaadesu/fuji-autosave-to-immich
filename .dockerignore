@@ -1,0 +1,5 @@
+# build/ holds test rootfs and vcam builds (hundreds of MB)
+build/
+.git
+.claude/
+**/__pycache__/

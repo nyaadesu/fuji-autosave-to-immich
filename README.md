@@ -66,6 +66,24 @@ If a download fails partway through, the daemon drops the session. A half-read
 object leaves Fuji cameras unresponsive (see libfuji `lib/jank.c`). Files that
 already finished are kept, and the next AutoSave picks up the rest.
 
+## Install with Docker
+
+The simplest deployment is the image, next to Immich, with every setting in
+[`compose.yaml`](compose.yaml):
+
+```sh
+curl -fsSLO https://raw.githubusercontent.com/nyaadesu/fuji-autosave-to-immich/main/compose.yaml
+echo 'IMMICH_API_KEY=...' > .env && chmod 600 .env
+vi compose.yaml                                   # library ID, paths, user
+docker compose run --rm fuji-autosave check       # test Immich settings and API key
+docker compose up -d
+```
+
+It needs host networking (the camera finds the receiver by broadcast). The
+Immich-side setup is in [docs/deploy-docker.md](docs/deploy-docker.md). The image is
+published to `ghcr.io/nyaadesu/fuji-autosave-to-immich` from `main` and `v*`
+tags. To build it yourself, run `scripts/fetch-deps.sh && docker compose build`.
+
 ## Build
 
 ```sh
@@ -99,7 +117,7 @@ fuji-autosave-receiver --inbox /fuji --state-dir /var/lib/fuji-autosave \
 
 The hook gets these variables: `FUJI_BATCH_LIST`, `FUJI_BATCH_COUNT`,
 `FUJI_INBOX`, `FUJI_STATE_DIR`, `FUJI_CAMERA_NAME` and `FUJI_CAMERA_MODEL`
-(the model is only known when registering). Batch lists hold absolute paths,
+(from the session's init response, e.g. `X-T30 II`). Batch lists hold absolute paths,
 one per line. `immich-hook` needs Python 3 (standard library only) and
 Immich 3.2 or newer, because it uses the structured search API that replaces
 the fields removed in v4. Its own
@@ -107,7 +125,7 @@ settings are listed at the top of the script and in
 `packaging/fuji-autosave.env.example`. `immich-hook --check` tests them and the
 API key without changing anything.
 
-For the OpenRC service in an Alpine LXC, see [docs/deploy-lxc.md](docs/deploy-lxc.md).
+For Docker, see [docs/deploy-docker.md](docs/deploy-docker.md). For the OpenRC service in an Alpine LXC, see [docs/deploy-lxc.md](docs/deploy-lxc.md).
 
 ## Phase 0: does the X-T30 II send RAF?
 
@@ -136,6 +154,7 @@ tests/test-exif.sh        # EXIF capture dates (src/exif.c): JPEG, RAF, malforme
 tests/test-register.sh    # registration against a scripted camera (quoted model name)
 tests/e2e-vcam.sh         # receiver vs. emulated camera, in a private network namespace
 tests/alpine-rootless.sh  # all of the above, built and run on Alpine (musl, busybox)
+tests/docker-e2e.sh       # the Docker image: vcam -> receiver container -> fake Immich (needs docker; runs in CI)
 ```
 
 `e2e-vcam.sh` builds a pinned vcam into `build/vcam` (it needs libexif
