@@ -1,3 +1,8 @@
 [submodule "third_party/libfuji"]
 	path = third_party/libfuji
-	url = https://github.com/petabyt/libfuji
+	url = https://github.com/nyaadesu/libfuji
+	branch = discovery-and-reset-fixes
+[submodule "third_party/libpict"]
+	path = third_party/libpict
+	url = https://github.com/nyaadesu/libpict
+	branch = fix-close-leaks-avail-no-usb

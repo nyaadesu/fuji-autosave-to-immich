@@ -11,9 +11,13 @@ endif()
 set(PTP_DEFAULT_LOGGING OFF CACHE BOOL "" FORCE)
 set(PTP_INCLUDE_BIND OFF CACHE BOOL "" FORCE)
 
-if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libfuji/libpict/CMakeLists.txt)
-    message(FATAL_ERROR "libfuji submodules missing; run scripts/fetch-deps.sh")
+if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libfuji/CMakeLists.txt
+        OR NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libpict/CMakeLists.txt)
+    message(FATAL_ERROR "submodules missing; run scripts/fetch-deps.sh")
 endif()
+# Our libpict (with fixes) first: libfuji only adds its bundled copy when no
+# libpict target exists yet
+add_subdirectory(third_party/libpict EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/libfuji EXCLUDE_FROM_ALL)
 
 add_executable(fuji-autosave-receiver

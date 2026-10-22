@@ -236,21 +236,12 @@ static int sink_add(void *arg, void *buf, unsigned int len, unsigned int offset,
 	return 0;
 }
 
-// ptp_close() frees the runtime and its data buffer but not the Fuji priv
-// struct, the prop table, the mutex or the TCP backend state; free those too
+// ptp_close() frees the runtime and everything libpict allocated for it, but
+// not the Fuji priv struct, which belongs to libfuji
 static void free_runtime(struct PtpRuntime *r) {
-	void *comm = r->comm_priv;
-	void *avail = r->avail;
-	pthread_mutex_t *mutex = r->mutex;
 	free(r->priv);
 	r->priv = NULL;
 	ptp_close(r);
-	free(comm);
-	free(avail);
-	if (mutex != NULL) {
-		pthread_mutex_destroy(mutex);
-		free(mutex);
-	}
 }
 
 // Session

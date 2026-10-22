@@ -53,7 +53,7 @@ already finished are kept, and the next AutoSave picks up the rest.
 
 ```sh
 git clone https://github.com/nyaadesu/fuji-autosave-to-immich && cd fuji-autosave-to-immich
-scripts/fetch-deps.sh               # libfuji + libpict (rewrites their SSH URL to HTTPS)
+scripts/fetch-deps.sh               # libfuji + libpict submodules (see Caveats)
 cmake -G Ninja -B build && cmake --build build
 sudo cmake --install build --prefix /usr/local
 ```
@@ -133,12 +133,22 @@ a rootless chroot, so it needs no Docker.
   and discovery then logs `Binding failed 98` and retries every 5 s.
 - **Same broadcast domain.** The camera finds the receiver by UDP broadcast, so
   they must share a LAN segment with no NAT in between.
-- libfuji has no tagged release. This repo pins commit `abe5531` as a
-  submodule, and `scripts/fetch-deps.sh` applies the fixes in `patches/`
-  (currently: parse discovery headers whole, so a quoted model with a space,
-  `DSCMODEL:"X-T30 II"`, is not cut to `"X-T30`). Submitted upstream as
-  [petabyt/libfuji#8](https://github.com/petabyt/libfuji/pull/8); once it is
-  merged, bump the submodule and delete the patch.
+- **Dependencies are forks with fixes.** libfuji and libpict have no tagged
+  releases, and several bugs this project hit are fixed but not yet merged
+  upstream. The submodules therefore track forks:
+
+  | Submodule | Fork branch | Upstream PRs |
+  | --- | --- | --- |
+  | `third_party/libfuji` | [nyaadesu/libfuji `discovery-and-reset-fixes`](https://github.com/nyaadesu/libfuji/tree/discovery-and-reset-fixes) | [#8](https://github.com/petabyt/libfuji/pull/8) (quoted model names), [#9](https://github.com/petabyt/libfuji/pull/9) (reset leak, socket leaks, `strncpy`) |
+  | `third_party/libpict` | [nyaadesu/libpict `fix-close-leaks-avail-no-usb`](https://github.com/nyaadesu/libpict/tree/fix-close-leaks-avail-no-usb) | [#21](https://github.com/petabyt/libpict/pull/21) (heap overflow, `ptp_close` leaks, `PTP_NO_USB`) |
+
+  The libfuji branch also has fixes not yet sent upstream: two out-of-bounds
+  writes in discovery, line-based parsing of the tether and DISCOVER headers,
+  and an HTTPS URL for its own libpict submodule. CMake builds
+  `third_party/libpict` and libfuji uses it instead of its bundled copy. Once
+  everything is merged, point both submodules back at petabyt's repos.
+  `src/main.c`'s `free_runtime()` relies on the fixed `ptp_close()` freeing
+  libpict's state; with an unfixed libpict it leaks about 100 bytes per session.
 
 ## Ideas
 
