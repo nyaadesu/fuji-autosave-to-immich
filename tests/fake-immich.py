@@ -9,10 +9,14 @@ but only on the FAKE_SCAN_POLLS-th search after it (scans are asynchronous in
 Immich). Files whose name contains FAKE_HIDE are never indexed.
 FAKE_EXIF="DSCF0030:X-H2;DSCF0031:X-T5" gives files whose name contains the
 key an EXIF Model; all others look like metadata extraction hasn't run yet.
-Behaviour copied from Immich v3.3.5: originalPath is a substring match,
-withExif is an inner join (assets without EXIF are left out), bulk adds report
-existing members as "duplicate", and creating a stack replaces any stack whose
-primary asset is one of the given assets.
+Files whose name contains FAKE_TRASH are indexed as trashed. FAKE_VERSION
+(default 3.3.5) is the reported server version, FAKE_PAGE_MAX caps page sizes.
+Behaviour copied from Immich v3.3.5's structured search (the deprecated flat
+fields are rejected, as v4 will): trashed assets match unless trashedAt is
+filtered, originalPath.startsWith is a case-insensitive prefix, withExif is a
+left join, paging is by cursor. Bulk adds report existing members as
+"duplicate", and creating a stack replaces any stack whose primary asset is
+one of the given assets.
 """
 import json
 import os
@@ -29,6 +33,9 @@ SCAN_POLLS = int(os.environ.get("FAKE_SCAN_POLLS", "2"))
 HIDE = os.environ.get("FAKE_HIDE", "")
 MEDIA = {".jpg", ".jpeg", ".raf"}
 EXIF = dict(kv.split(":", 1) for kv in os.environ.get("FAKE_EXIF", "").split(";") if kv)
+TRASH = os.environ.get("FAKE_TRASH", "")
+VERSION = os.environ.get("FAKE_VERSION", "3.3.5")
+PAGE_MAX = int(os.environ.get("FAKE_PAGE_MAX", "1000"))
 
 assets = {}       # id -> asset
 tags = {}         # value -> {id, value, name}
@@ -55,10 +62,36 @@ def index_library():
                 continue
             i = new_id()
             assets[i] = {"id": i, "originalPath": path, "originalFileName": f, "libraryId": LIBRARY_ID,
-                         "visibility": "timeline", "isOffline": False, "stackId": None}
+                         "visibility": "timeline", "isOffline": False, "stackId": None,
+                         "deletedAt": "2026-10-01T00:00:00.000Z" if TRASH and TRASH in f else None}
             for key, model in EXIF.items():
                 if key in f:
                     exif[i] = {"make": "FUJIFILM", "model": model}
+
+
+def matches(a, f):
+    """The subset of Immich's SearchFilter the hook uses; anything else is a KeyError."""
+    for key, cond in f.items():
+        if key == "libraryId":
+            ok = a["libraryId"] == cond["eq"]
+        elif key == "originalPath":
+            # startsWith is a case-insensitive LIKE prefix
+            ok = a["originalPath"].lower().startswith(cond["startsWith"].lower())
+        elif key == "tagIds":
+            ok = any(a["id"] in tag_assets.get(t, set()) for t in cond["any"])
+        elif key == "albumIds":
+            ok = any(a["id"] in albums[al]["assets"] for al in cond["any"])
+        elif key == "trashedAt":
+            ok = a["deletedAt"] == cond["eq"]
+        elif key == "isOffline":
+            ok = a["isOffline"] == cond["eq"]
+        elif key == "visibility":
+            ok = a["visibility"] in cond["in"]
+        else:
+            raise KeyError(key)
+        if not ok:
+            return False
+    return True
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -95,29 +128,30 @@ class Handler(BaseHTTPRequestHandler):
                 if scan_pending <= 0:
                     index_library()
                     scan_pending = None
-            items = list(assets.values())
-            if body.get("libraryId"):
-                items = [a for a in items if a["libraryId"] == body["libraryId"]]
-            if body.get("originalPath"):
-                needle = body["originalPath"].lower()
-                items = [a for a in items if needle in a["originalPath"].lower()]
-            for t in body.get("tagIds") or []:
-                items = [a for a in items if a["id"] in tag_assets.get(t, set())]
-            for al in body.get("albumIds") or []:
-                items = [a for a in items if a["id"] in albums[al]["assets"]]
-            if body.get("visibility"):
-                items = [a for a in items if a["visibility"] == body["visibility"]]
-            else:
-                items = [a for a in items if a["visibility"] != "locked"]
+            # Structured filters only: the flat fields are deprecated and go away in v4
+            flat = sorted(set(body) - {"filter", "cursor", "size", "withExif", "withStacked", "orderBy"})
+            if flat:
+                return self.reply(400, {"message": f"deprecated flat search fields: {flat}"})
+            try:
+                items = [a for a in assets.values() if matches(a, body.get("filter") or {})]
+            except KeyError as e:
+                return self.reply(400, {"message": f"unsupported filter {e}"})
             if body.get("withExif"):
-                items = [dict(a, exifInfo=exif[a["id"]]) for a in items if a["id"] in exif]
+                # A left join: assets without EXIF yet have exifInfo null
+                items = [dict(a, exifInfo=exif.get(a["id"])) for a in items]
             items.sort(key=lambda a: a["originalPath"])
-            page, size = body.get("page", 1), body.get("size", 250)
-            chunk = items[(page - 1) * size:page * size]
-            more = len(items) > page * size
+            # FAKE_PAGE_MAX caps the page size so tests exercise cursors
+            size = min(body.get("size", 250), PAGE_MAX)
+            offset = int(body.get("cursor") or 0)
+            chunk = items[offset:offset + size]
+            more = len(items) > offset + size
             return self.reply(200, {"albums": {"items": [], "total": 0, "count": 0},
                                     "assets": {"items": chunk, "total": len(chunk), "count": len(chunk),
-                                               "nextPage": str(page + 1) if more else None}})
+                                               "nextPage": None, "facets": [],
+                                               "nextCursor": str(offset + size) if more else None}})
+        if method == "GET" and p == "/api/server/version":
+            major, minor, patch = (int(x) for x in VERSION.split("."))
+            return self.reply(200, {"major": major, "minor": minor, "patch": patch, "prerelease": None})
         if method == "GET" and p == "/api/tags":
             return self.reply(200, list(tags.values()))
         if method == "PUT" and p == "/api/tags":

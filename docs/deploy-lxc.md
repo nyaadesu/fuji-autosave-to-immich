@@ -58,6 +58,9 @@ required, but it makes debugging easier.
 
 ## 3. Immich (one time)
 
+The hook needs **Immich 3.2 or newer** (structured search API). `immich-hook
+--check` prints the server version and refuses older ones.
+
 Mount the dataset into `immich-server` **read-only**. darktable owns the
 `.RAF.xmp` sidecars, and Immich must not write to them:
 

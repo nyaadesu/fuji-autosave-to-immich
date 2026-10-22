@@ -52,6 +52,7 @@ JPEG_EXTS = {".jpg", ".jpeg"}
 RAW_EXTS = {".raf"}
 PAGE_SIZE = 1000
 CHUNK = 500
+MIN_VERSION = (3, 2, 0)  # structured search filters and cursors
 
 
 def log(msg):
@@ -145,16 +146,33 @@ class Immich:
         except ValueError:
             raise Fail(f"{method} {path}: response is not JSON (wrong IMMICH_URL?)") from None
 
-    def search(self, **filters):
-        """All assets matching a /search/metadata filter, across pages."""
-        page, items = 1, []
+    def require_version(self):
+        v = self.call("GET", "/server/version")
+        version = (v["major"], v["minor"], v["patch"])
+        if version < MIN_VERSION:
+            raise Fail("Immich %d.%d.%d is too old; this hook needs %d.%d or newer" % (version + MIN_VERSION[:2]))
+        return version
+
+    def assets(self, library, with_exif=False, live=True, **conditions):
+        """Assets of the library matching the structured search filter
+        `conditions` (Immich >= 3.2; the flat search fields go away in v4).
+        live=False also returns trashed, offline and locked ones."""
+        base = {"libraryId": {"eq": library}}
+        if live:
+            # The structured search returns trashed and the owner's locked
+            # assets unless told otherwise
+            base.update(trashedAt={"eq": None}, isOffline={"eq": False},
+                        visibility={"in": ["timeline", "archive"]})
+        body = {"filter": dict(base, **conditions), "size": PAGE_SIZE}
+        if with_exif:
+            body["withExif"] = True  # a left join: assets without EXIF yet come back with exifInfo null
+        items = []
         while True:
-            res = self.call("POST", "/search/metadata", dict(filters, page=page, size=PAGE_SIZE))
-            assets = res["assets"]
-            items.extend(assets["items"])
-            if not assets.get("nextPage"):
+            res = self.call("POST", "/search/metadata", body)["assets"]
+            items.extend(res["items"])
+            if not res.get("nextCursor"):
                 return items
-            page = int(assets["nextPage"])
+            body["cursor"] = res["nextCursor"]
 
 
 def chunks(ids):
@@ -223,8 +241,10 @@ def wait_for_assets(immich, cfg, wanted):
     delay = 2.0
     while True:
         for folder in folders:
-            # originalPath is a substring match; compare exactly here
-            for a in immich.search(libraryId=cfg["library"], originalPath=folder):
+            # startsWith is a case-insensitive LIKE (_ and % are wildcards); compare exactly here
+            # Any asset counts as found, even one trashed in Immich since:
+            # otherwise its batch would never be retired
+            for a in immich.assets(cfg["library"], live=False, originalPath={"startsWith": folder}):
                 missing.discard(a["originalPath"])
         if not missing:
             return missing
@@ -248,7 +268,7 @@ def tag_assets(immich, cfg, assets, session_paths):
     tagged = set()
     for t in immich.call("GET", "/tags"):
         if is_camera_tag(t["value"]):
-            tagged.update(a["id"] for a in immich.search(libraryId=lib, tagIds=[t["id"]]))
+            tagged.update(a["id"] for a in immich.assets(lib, tagIds={"any": [t["id"]]}))
     todo = [a for a in assets if a["id"] not in tagged]
     if not todo:
         return 0, 0
@@ -258,13 +278,12 @@ def tag_assets(immich, cfg, assets, session_paths):
     if cfg["tag"]:
         wanted[cfg["tag"]] = [a["id"] for a in todo]
     else:
-        # withExif is an inner join: assets whose metadata isn't extracted yet are left out
-        models = {a["id"]: ((a.get("exifInfo") or {}).get("model") or "").strip()
-                  for a in immich.search(libraryId=lib, withExif=True)}
         for a in todo:
-            # The session's model only describes this session's files, not
-            # older queued batches (which may come from another body)
-            model = models.get(a["id"]) or (cfg["session_model"] if a["originalPath"] in session_paths else "")
+            # EXIF first; the session's model only describes this session's
+            # files, not older queued batches (which may come from another body)
+            model = ((a.get("exifInfo") or {}).get("model") or "").strip()
+            if not model and a["originalPath"] in session_paths:
+                model = cfg["session_model"]
             if not model:
                 unknown += 1
                 continue
@@ -303,8 +322,8 @@ def add_all(immich, path, ids):
 
 def reconcile(immich, cfg, new_paths, session_paths):
     root = cfg["container_root"] + "/"
-    assets = [a for a in immich.search(libraryId=cfg["library"])
-              if a["originalPath"].startswith(root) and not a.get("isOffline")]
+    assets = [a for a in immich.assets(cfg["library"], with_exif=True, originalPath={"startsWith": root})
+              if a["originalPath"].startswith(root)]
     by_path = {a["originalPath"]: a for a in assets}
     stats = {"assets": len(assets)}
 
@@ -347,7 +366,7 @@ def reconcile(immich, cfg, new_paths, session_paths):
     album_id, created = ensure_album(immich, cfg["album"])
     if created:
         log(f"created album {cfg['album']!r}")
-    in_album = {a["id"] for a in immich.search(libraryId=cfg["library"], albumIds=[album_id])}
+    in_album = {a["id"] for a in immich.assets(cfg["library"], albumIds={"any": [album_id]})}
     raws = [a["id"] for a in assets if kind(a["originalPath"]) == "raw" and a["id"] not in in_album]
     stats["album"] = add_all(immich, f"/albums/{album_id}/assets", raws)
 
@@ -358,6 +377,7 @@ def reconcile(immich, cfg, new_paths, session_paths):
 
 
 def check(immich, cfg):
+    log("Immich %d.%d.%d" % immich.require_version())
     lib = immich.call("GET", f"/libraries/{cfg['library']}")
     log(f"library {lib.get('name')!r}, import paths {lib.get('importPaths')}")
     paths = [posixpath.normpath(p) for p in lib.get("importPaths", [])]
@@ -365,7 +385,7 @@ def check(immich, cfg):
         raise Fail(f"PHOTO_ROOT_CONTAINER {cfg['container_root']} is not an import path of this library")
     if not os.path.isdir(cfg["host_root"]):
         raise Fail(f"PHOTO_ROOT_HOST {cfg['host_root']} is not a directory")
-    n = len(immich.search(libraryId=cfg["library"]))
+    n = len(immich.assets(cfg["library"]))
     log(f"ok: {n} asset(s) in the library, RAW_MODE={cfg['mode']}")
 
 
@@ -388,6 +408,7 @@ def run(cfg):
         if not paths:
             os.unlink(list_path)
 
+    immich.require_version()
     immich.call("POST", f"/libraries/{cfg['library']}/scan")
     log(f"scan started; waiting for {len(wanted)} file(s)")
     missing = wait_for_assets(immich, cfg, wanted) if wanted else set()

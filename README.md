@@ -93,7 +93,9 @@ fuji-autosave-receiver --inbox /fuji --state-dir /var/lib/fuji-autosave \
 The hook gets these variables: `FUJI_BATCH_LIST`, `FUJI_BATCH_COUNT`,
 `FUJI_INBOX`, `FUJI_STATE_DIR`, `FUJI_CAMERA_NAME` and `FUJI_CAMERA_MODEL`
 (the model is only known when registering). Batch lists hold absolute paths,
-one per line. `immich-hook` needs Python 3 (standard library only). Its own
+one per line. `immich-hook` needs Python 3 (standard library only) and
+Immich 3.2 or newer, because it uses the structured search API that replaces
+the fields removed in v4. Its own
 settings are listed at the top of the script and in
 `packaging/fuji-autosave.env.example`. `immich-hook --check` tests them and the
 API key without changing anything.

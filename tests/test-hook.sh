@@ -57,6 +57,8 @@ hook() { "$HERE/scripts/immich-hook" "$@" 2>> "$T/hook.log"; }
 export FUJI_STATE_DIR="$T/state" FUJI_INBOX="$T/lib" FUJI_CAMERA_NAME=VCAM FUJI_CAMERA_MODEL="X-T30 II"
 export IMMICH_API_KEY=test-key LIBRARY_ID=11111111-1111-4111-8111-111111111111
 export PHOTO_ROOT_CONTAINER=/mnt/fuji SCAN_TIMEOUT=20
+# Tiny pages, so every scenario walks search cursors
+export FAKE_PAGE_MAX=2
 # Settings file: its values apply unless the environment already sets them
 cat > "$T/env" <<'EOF'
 RAW_ALBUM_NAME="Fuji RAW"
@@ -149,5 +151,38 @@ hook "$T/state/batches/b9.list" || fail "mismatched pair run failed"
 [ "$(state 'len(s["stacks"])')" = 0 ] || fail "different shots stacked"
 grep -q "not pairing $M/$D2/DSCF0040.JPG" "$T/hook.log" || fail "refused pair not logged"
 [ "$(state 's["tags"]["Camera/X-T30 II"]')" = "['$M/$D2/DSCF0041.JPG']" ] || fail "session model applied outside its batch: $(state 's["tags"]')"
+
+# 9. Trashed assets are left alone (the structured search would return them)
+export FAKE_TRASH=DSCF0051
+setup
+unset FAKE_TRASH
+batch b10 $D1/DSCF0050.RAF $D1/DSCF0051.RAF $D1/DSCF0052.JPG $D1/DSCF0053.JPG
+hook "$T/state/batches/b10.list" || fail "a trashed file kept the batch waiting"
+[ ! -e "$T/state/batches/b10.list" ] || fail "batch with a trashed file not retired"
+[ "$(state 's["albums"]["Fuji RAW"]')" = "['$M/$D1/DSCF0050.RAF']" ] || fail "trashed asset added to album: $(state 's["albums"]')"
+[ "$(state 'len(s["tags"]["Camera/X-T30 II"])')" = 3 ] || fail "live assets not all tagged: $(state 's["tags"]')"
+[ "$(state '"'$M/$D1/DSCF0051.RAF'" in s["tags"]["Camera/X-T30 II"]')" = False ] || fail "trashed asset tagged"
+grep -q '"cursor": ' "$T/srv/calls.log" || fail "search cursors never followed"
+# The fake refuses the deprecated flat search fields (as v4 will), so every
+# scenario above passing means the hook never sends them; check the refusal
+[ "$(python3 -c '
+import json, sys, urllib.request, urllib.error
+req = urllib.request.Request(sys.argv[1] + "/search/metadata", data=json.dumps({"libraryId": sys.argv[2]}).encode(),
+                             headers={"x-api-key": "test-key", "Content-Type": "application/json"}, method="POST")
+try:
+    urllib.request.urlopen(req); print(200)
+except urllib.error.HTTPError as e:
+    print(e.code)' "$IMMICH_URL" "$LIBRARY_ID")" = 400 ] || fail "fake Immich accepts flat search fields"
+
+# 10. Immich older than 3.2 (no structured search) is refused up front
+export FAKE_VERSION=3.1.4
+setup
+unset FAKE_VERSION
+batch b11 $D1/DSCF0060.JPG
+if hook --check; then fail "--check accepted Immich 3.1"; fi
+if hook "$T/state/batches/b11.list"; then fail "hook ran against Immich 3.1"; fi
+grep -q 'Immich 3.1.4 is too old; this hook needs 3.2 or newer' "$T/hook.log" || fail "version error not logged"
+[ -f "$T/state/batches/b11.list" ] || fail "batch dropped on version error"
+! grep -q '^POST /api/libraries' "$T/srv/calls.log" || fail "scanned despite the version error"
 
 echo "immich-hook: all checks passed"

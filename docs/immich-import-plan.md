@@ -117,7 +117,7 @@ and server source (latest release on 2026-10-22). Recheck after a major upgrade.
 | Item | Result |
 |---|---|
 | Scan | `POST /api/libraries/{id}/scan`, no body, 204. Permission `library.update`. |
-| Search filter | `originalPath` exists, but it is a case-insensitive **substring** match (`ilike '%…%'`), not an exact match. The hook searches by day folder plus `libraryId` and compares paths exactly itself. By default the results include timeline and archived assets and stacked children (`withStacked` only filters when `false`), but not locked ones. |
+| Search filter | The flat `originalPath` field is a case-insensitive **substring** match (`ilike '%…%'`) and deprecated, see the structured search note below. |
 | `stack` on assets | Search results do **not** include `stack` (only `stackId` internally). The hook reads stack membership from `GET /api/stacks` (all of the user's stacks with their assets) instead. |
 | Re-stacking | `POST /api/stacks` is not harmless to repeat: it deletes any stack whose primary is one of the given assets and creates a new one with the union of their assets. Hence the skip. It requires `asset.update` on the assets. |
 | Tag / album add | `PUT /api/tags/{id}/assets` and `PUT /api/albums/{id}/assets` return per-ID results; assets already present come back as `{"success": false, "error": "duplicate"}`. Confirmed harmless. |
@@ -158,8 +158,21 @@ How the implementation maps onto the plan:
   it is the model the camera reported in the PTP/IP session
   (`FUJI_CAMERA_MODEL`). An asset with neither stays untagged until a later run.
   Any `Camera/…` tag counts as tagged. Setting `CAMERA_TAG` restores one fixed
-  tag. Note `search/metadata` with `withExif: true` is an inner join, so the
-  hook only uses it to look up models, never to list assets. Listing tags needs
-  `tag.read`.
+  tag. Listing tags needs `tag.read`.
+- **Search uses the structured format (Immich ≥ 3.2).** The flat fields
+  `libraryId`, `originalPath`, `tagIds`, `albumIds`, `page` of
+  `POST /api/search/metadata` are deprecated since v3.2.0 and removed in v4. The
+  hook sends `{"filter": {...}, "size": 1000, "cursor": ...}` instead, for example
+  `{"libraryId": {"eq": id}, "originalPath": {"startsWith": "/mnt/fuji/2026/2026-10-22/"}}`,
+  `{"tagIds": {"any": [id]}}` and `{"albumIds": {"any": [id]}}`, and follows
+  `nextCursor`. Unlike the old format, it returns trashed assets and the owner's
+  locked ones unless filtered, so every listing adds
+  `trashedAt: {eq: null}`, `isOffline: {eq: false}` and
+  `visibility: {in: [timeline, archive]}`. The exception is the wait for new files,
+  where any asset at the path counts as found (otherwise a file trashed in Immich
+  would keep its batch queued forever). `withExif` is a left join in this format,
+  so the main listing returns the EXIF models too. `startsWith` is still a
+  case-insensitive LIKE, so paths are compared exactly afterwards. The hook checks
+  `GET /api/server/version` and refuses to run on anything older than 3.2.
 - Extra settings: `RAW_MODE` (`stack`/`archive`) and `SCAN_TIMEOUT` (seconds,
   default 900).
