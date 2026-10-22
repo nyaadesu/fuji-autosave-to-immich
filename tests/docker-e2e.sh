@@ -17,7 +17,9 @@ T=$(mktemp -d)
 cleanup() {
 	docker rm -f "$NET-recv" "$NET-vcam" "$NET-immich" >/dev/null 2>&1 || true
 	docker network rm "$NET" >/dev/null 2>&1 || true
-	rm -rf "$T"
+	# The containers wrote as uid 1000, which may not be us: remove as root in a container
+	docker run --rm --user 0 -v "$T:/t" --entrypoint rm "$IMAGE" -rf /t/lib /t/state /t/srv >/dev/null 2>&1 || true
+	rm -rf "$T" 2>/dev/null || true
 }
 trap cleanup EXIT
 fail() {
