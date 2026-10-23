@@ -1,7 +1,8 @@
 #!/bin/sh
 # Exercise scripts/immich-hook against tests/fake-immich.py: scan and wait, tag,
 # stack JPEG+RAF pairs with the JPEG on top, RAW album, idempotent re-runs, a
-# scan timeout that keeps the batch queued, Immich being down, and RAW_MODE=archive.
+# scan timeout that keeps the batch queued, Immich being down, RAW_MODE=archive,
+# deletions, and the --sync pass that keeps a pair's rating and favorite equal.
 set -eu
 [ "${TEST_TRACE:-0}" = 1 ] && set -x
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -53,13 +54,15 @@ print(eval(sys.argv[2]))' "$IMMICH_URL" "$1"
 
 hook() { "$HERE/scripts/immich-hook" "$@" 2>> "$T/hook.log"; }
 
-# Act like a user in Immich's web UI: user OP [container path]
+# Act like a user in Immich's web UI: user OP [container path [JSON value]]
 user() {
 	python3 -c '
 import json, sys, urllib.request
 body = {"op": sys.argv[2]}
 if len(sys.argv) > 3:
     body["path"] = sys.argv[3]
+if len(sys.argv) > 4:
+    body["value"] = json.loads(sys.argv[4])
 req = urllib.request.Request(sys.argv[1] + "/_user", data=json.dumps(body).encode(), method="POST",
                              headers={"x-api-key": "test-key", "Content-Type": "application/json"})
 urllib.request.urlopen(req)' "$IMMICH_URL" "$@"
@@ -246,5 +249,60 @@ user wipe
 if hook; then fail "hook ran against an empty Immich"; fi
 grep -q "Immich lists no assets in the library, but 5 are recorded" "$T/hook.log" || fail "empty-Immich error not logged"
 [ "$(find "$T/lib" -type f | wc -l)" = 5 ] || fail "files deleted although Immich listed nothing"
+
+# 15. --sync (the container's timer): no scan, queued batches stay queued,
+#     silent when nothing changed. A rating or favorite set on either file of a
+#     pair is copied to the other; the JPEG (stack cover) wins if both changed.
+#     A photo deleted in Immich loses its file. It skips while a run holds the lock.
+export FAKE_EXIF='DSCF008:X-T30 II'
+setup
+unset FAKE_EXIF
+batch b15 $D1/DSCF0080.JPG $D1/DSCF0080.RAF $D1/DSCF0081.JPG $D1/DSCF0081.RAF
+user_rated() { state 's["ratings"]["'"$M/$D1/$1"'"]'; }
+hook "$T/state/batches/b15.list" || fail "run before sync failed"
+batch b16 $D2/DSCF0089.JPG
+: > "$T/srv/calls.log"
+: > "$T/hook.log"
+hook --sync || fail "sync with nothing to do failed"
+[ ! -s "$T/hook.log" ] || fail "sync logged without changes: $(cat "$T/hook.log")"
+! grep -q '^POST /api/libraries' "$T/srv/calls.log" || fail "sync started a scan"
+[ -f "$T/state/batches/b16.list" ] || fail "sync consumed a queued batch"
+user rate $M/$D1/DSCF0080.JPG 4
+user favorite $M/$D1/DSCF0081.RAF true
+hook --sync || fail "sync after rating failed"
+[ "$(user_rated DSCF0080.RAF)" = "[4, False]" ] || fail "cover rating not copied to the RAF: $(user_rated DSCF0080.RAF)"
+[ "$(user_rated DSCF0081.JPG)" = "[None, True]" ] || fail "RAF favorite not copied to the JPEG: $(user_rated DSCF0081.JPG)"
+grep -q 'sync: 2 pair rating/favorite(s) copied' "$T/hook.log" || fail "sync not logged: $(cat "$T/hook.log")"
+user rate $M/$D1/DSCF0080.RAF 2
+hook --sync || fail "sync after RAF rating failed"
+[ "$(user_rated DSCF0080.JPG)" = "[2, False]" ] || fail "RAF rating not copied to the JPEG: $(user_rated DSCF0080.JPG)"
+user rate $M/$D1/DSCF0080.JPG 5
+user rate $M/$D1/DSCF0080.RAF 1
+user rate $M/$D1/DSCF0081.RAF -1
+hook --sync || fail "sync after both changed failed"
+[ "$(user_rated DSCF0080.RAF)" = "[5, False]" ] || fail "JPEG did not win: $(user_rated DSCF0080.RAF)"
+[ "$(user_rated DSCF0081.JPG)" = "[-1, True]" ] || fail "rejection not copied: $(user_rated DSCF0081.JPG)"
+user rate $M/$D1/DSCF0080.JPG null
+hook --sync || fail "sync after unrating failed"
+[ "$(user_rated DSCF0080.RAF)" = "[None, False]" ] || fail "unrating not copied: $(user_rated DSCF0080.RAF)"
+user delete $M/$D1/DSCF0081.RAF
+python3 -c '
+import fcntl, sys, time
+f = open(sys.argv[1], "w")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(30)' "$T/state/hook.lock" "$T/locked" &
+LOCKER=$!
+i=0
+while [ ! -e "$T/locked" ]; do
+	i=$((i + 1)); [ $i -lt 50 ] || fail "lock holder did not start"; sleep 0.1
+done
+hook --sync || fail "sync failed while locked"
+[ -f "$T/lib/$D1/DSCF0081.RAF" ] || fail "sync ran despite the lock"
+kill $LOCKER; wait $LOCKER 2>/dev/null || true
+hook --sync || fail "sync after delete failed"
+[ ! -e "$T/lib/$D1/DSCF0081.RAF" ] || fail "sync kept a deleted photo's file"
+grep -q "deleted $T/lib/$D1/DSCF0081.RAF (deleted in Immich)" "$T/hook.log" || fail "sync deletion not logged"
+grep -q '^PUT /api/assets .*"rating": null' "$T/srv/calls.log" || fail "unrated sent as something other than null"
 
 echo "immich-hook: all checks passed"

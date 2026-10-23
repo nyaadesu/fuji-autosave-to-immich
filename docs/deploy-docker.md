@@ -8,7 +8,7 @@ setup is still described in [deploy-lxc.md](deploy-lxc.md).)
 
 ```
 host /data2/fuji ──> fuji-autosave  /fuji      (read-write, the receiver's inbox)
-                 ──> immich-server  /mnt/fuji  (read-only, the library's import path)
+                 ──> immich-server  /mnt/fuji  (read-write, the library's import path)
                  ──> SMB            darktable / Lightroom
 ```
 
@@ -44,32 +44,53 @@ chown 1000:1000 /data2/fuji /data2/config/fuji-autosave
 ```
 
 The container runs as `user: "1000:1000"` (in `compose.yaml`), and new files
-belong to that uid. Pick the uid of the user that edits over SMB, or give the
-dataset a shared group (`chmod 2775`, `FUJI_UMASK: "002"`). In an unprivileged
-LXC, host uids are shifted by 100000 (container uid 1000 = host uid 101000).
+belong to that uid. Immich (step 3) and the user that edits over SMB also have
+to delete files and write `.xmp` sidecars in the library, so give them all one
+group: pick a gid (here 2000), set it as the container's group
+(`user: "1000:2000"`), make Immich's user and the SMB user members, and make
+the folders setgid so new files keep the group. `FUJI_UMASK: "002"` (the
+default) makes new folders and files group-writable. On the host:
+
+```sh
+chgrp -R 2000 /data2/fuji && find /data2/fuji -type d -exec chmod 2775 {} +
+```
+
+In an unprivileged LXC, host ids are shifted by 100000 (container uid 1000 =
+host uid 101000, container gid 2000 = host gid 102000): use host gid 102000
+above, and the same gid 2000 in every LXC that shares the dataset.
 
 Keep ZFS snapshots of `data2/fuji` (sanoid, zfs-auto-snapshot). The hook deletes
 files that you deleted in Immich, and snapshots are the safety net.
 
 ## 3. Immich (one time)
 
-Needs **Immich 3.2 or newer**. Mount the dataset **read-only** into
+Needs **Immich 3.2 or newer**. Mount the dataset **read-write** into
 `immich-server` (in Immich's own compose file):
 
 ```yaml
 immich-server:
   volumes:
-    - /data2/fuji:/mnt/fuji:ro
+    - /data2/fuji:/mnt/fuji
 ```
+
+Read-write, because deleting a photo for good in Immich then deletes its file
+and sidecar (with a read-only mount the next scan would import it again), and
+because Immich writes ratings and other changes into `<file>.xmp`, where
+darktable reads them (see [Ratings and darktable](#ratings-and-darktable)).
+Immich's user needs the group from step 2. If Immich runs natively in an LXC,
+bind-mount the dataset there (`pct set <id> -mpX /data2/fuji,mp=/fuji`), add
+its user to the group (`groupadd -g 2000 fuji && usermod -aG fuji immich`,
+then restart Immich), and use `/fuji` as the import path and as
+`PHOTO_ROOT_CONTAINER`.
 
 Then, in the Immich web UI:
 
 1. Administration → External Libraries → Create library, owned by your own
    user, import path `/mnt/fuji`. Note its ID (shown in the page URL).
-2. Administration → Settings → External Library: turn **off** periodic
-   scanning. The hook triggers a scan after every batch, and an extra scan
-   would import a photo you deleted in Immich again before the hook can delete
-   its file.
+2. Periodic scanning of external libraries (Administration → Settings →
+   External Library) can stay on. With a read-only mount it has to be off,
+   or a scan imports a photo deleted in Immich again before the hook
+   deletes its file.
 3. Account Settings → API Keys → New API key, as that same user, with these
    permissions: `library.read`, `library.update`, `asset.read`, `asset.update`,
    `tag.read`, `tag.create`, `tag.asset`, `stack.read`, `stack.create`,
@@ -107,6 +128,22 @@ docker compose build
 2. Start PC AUTO SAVE from the Playback menu. The log shows each `saved ...`
    file, `session done`, then the hook (`scan started`, and a `done:` summary).
 
+## Ratings and darktable
+
+Pick photos in Immich, edit them in darktable. When you change a rating,
+description, date or location in Immich, it writes that into the file's
+`.xmp` sidecar, and darktable reads it from there.
+
+- Rate the stack (its cover is the JPEG). Within `SYNC_INTERVAL` (5 minutes)
+  the receiver copies a rating or favorite to the other file of the pair, so
+  `DSCF1234.RAF.xmp` gets the stars darktable shows. Favorites stay in Immich.
+- In darktable, turn on Preferences → Storage → "look for updated XMP files on
+  startup", so it loads what Immich changed instead of overwriting it, and
+  set the initial rating of imported images to 0 stars.
+- Don't rate or describe in darktable: Immich doesn't read a sidecar again
+  when it changes, and its next write would overwrite those fields.
+- Immich's thumbnails are the camera's rendering, not darktable's edits.
+
 ## Operating it
 
 | Task | Command |
@@ -114,6 +151,7 @@ docker compose build
 | Logs | `docker compose logs -f` |
 | Retry queued batches now | `docker compose exec fuji-autosave docker-entrypoint hook` |
 | Check settings and API key | `docker compose run --rm fuji-autosave check` |
+| Sync pair ratings and deletions now | `docker compose exec fuji-autosave docker-entrypoint hook --sync` |
 | Update | `docker compose pull && docker compose up -d` |
 | Verbose protocol log | set `FUJI_EXTRA_ARGS: "--verbose"`, then `docker compose up -d` |
 

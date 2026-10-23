@@ -6,7 +6,7 @@
 The setup: an unprivileged **Alpine** LXC bridged onto the LAN runs the
 receiver as an OpenRC service. The ZFS dataset `data2/fuji` is bind-mounted
 into it, and the receiver writes the camera's files straight into it. Immich
-reads the same dataset read-only as an
+reads and writes the same dataset as an
 [external library](https://docs.immich.app/features/libraries), and the hook
 scans, tags, stacks and files them into the RAW album. Nothing is uploaded or
 copied twice. The full build and test suite passes on Alpine 3.24 (musl,
@@ -19,7 +19,7 @@ for the design.
 
 ```
 host /data2/fuji ──bind──> receiver LXC /fuji         (read-write, --inbox)
-                 ──bind──> immich-server  /mnt/fuji    (read-only, library import path)
+                 ──bind──> immich-server  /mnt/fuji    (read-write, library import path)
                  ──SMB───> darktable / Lightroom       (edit in place, .RAF.xmp sidecars)
 ```
 
@@ -64,13 +64,15 @@ required, but it makes debugging easier.
 The hook needs **Immich 3.2 or newer** (structured search API). `immich-hook
 --check` prints the server version and refuses older ones.
 
-Mount the dataset into `immich-server` **read-only**. darktable owns the
-`.RAF.xmp` sidecars, and Immich must not write to them:
+Mount the dataset into `immich-server` **read-write**, so Immich can delete
+files and write sidecars, and give its user the shared group from step 2. Why,
+and how ratings reach darktable:
+[deploy-docker.md § Ratings and darktable](deploy-docker.md#ratings-and-darktable).
 
 ```yaml
 immich-server:
   volumes:
-    - /data2/fuji:/mnt/fuji:ro
+    - /data2/fuji:/mnt/fuji
 ```
 
 If Immich itself runs in an LXC, bind-mount `/data2/fuji` into that container
@@ -83,10 +85,9 @@ Then, in the Immich web UI:
 1. Administration → External Libraries → Create library, **owned by your own
    user**, import path `/mnt/fuji` (the container path). Add the exclusion
    pattern `**/.incoming/**`, where the receiver keeps partial downloads.
-   Turn off periodic scanning of external libraries (Administration →
-   Settings → External Library). The hook triggers a scan after every batch,
-   and a scan Immich starts on its own would import a photo you deleted in
-   Immich again before the hook can delete its file. Note the library ID (it is in the page URL, or list them with
+   Periodic scanning of external libraries can stay on (with a read-only
+   mount, turn it off: a scan would import a photo deleted in Immich again
+   before the hook deletes its file). Note the library ID (it is in the page URL, or list them with
    `curl -H "x-api-key: $KEY" http://immich.lan:2283/api/libraries`).
 2. Account Settings → API Keys → New API key, as that same user, with these
    permissions: `library.read`, `library.update`, `asset.read`, `asset.update`,
@@ -121,6 +122,10 @@ doas -u fuji /usr/local/lib/fuji-autosave/immich-hook --check
 
 rc-update add fuji-autosave default && rc-service fuji-autosave start
 tail -f /var/log/messages                    # logs go to syslog, tag fuji-autosave
+
+# Every 5 minutes: pair ratings, catching up, deletions (the image's SYNC_INTERVAL)
+echo '*/5 * * * * doas -u fuji /usr/local/lib/fuji-autosave/immich-hook --sync 2>&1 | logger -t fuji-autosave' >> /etc/crontabs/root
+rc-update add crond default && rc-service crond start
 ```
 
 The build tools are only needed to compile. Afterwards you can remove them
@@ -156,23 +161,26 @@ Unstack the test pair by hand and rerun the hook.
 
 ## Things to know
 
-- **Deleting a photo in Immich deletes the file.** After Immich empties it
-  from the trash (30 days by default, or "Delete permanently"), the hook's next
-  run deletes the file and its `.xmp` from `/data2/fuji`. A run that would
-  delete more than `DELETE_LIMIT` files fails instead and logs why. Keep ZFS
-  snapshots of `data2/fuji` (e.g. with `zfs-auto-snapshot` or sanoid on the
-  host) as the real safety net against mistakes. `DELETE_REMOVED=0` turns this
-  off.
+- **Deleting a photo in Immich deletes the file.** When Immich empties it
+  from the trash (30 days by default, or "Delete permanently"), it deletes the
+  file and its `.xmp` itself. With a read-only mount, the hook's next run does.
+  Only the hook has a safety stop: a run that would delete more than
+  `DELETE_LIMIT` files fails instead and logs why. Immich deletes whatever you
+  empty from the trash. Keep ZFS snapshots of `data2/fuji` (e.g. with
+  `zfs-auto-snapshot` or sanoid on the host) as the real safety net against
+  mistakes. `DELETE_REMOVED=0` turns the hook's deletion off.
 - **The hook's memory is `/var/lib/fuji-autosave/library.json`.** Deleting
   that file makes the hook treat every photo as new on its next run: it tags,
   stacks and adds them to the album again, and only deletes files it has seen
   again since.
 
-- **Immich's "Sidecar" job fails for every tagged asset. That is expected.**
-  Each tag added through the API makes Immich (v3.3.5) try to write the tags
-  into `<file>.xmp`, which for a RAF is darktable's `DSCF1234.RAF.xmp`. The
-  read-only mount stops it, and that is what keeps darktable's sidecars safe.
-  **Never mount the library read-write into Immich.**
+- **Immich writes `<file>.xmp`.** Each tag, rating or other change made in
+  Immich or through the API makes Immich (v3.3) write description, date, GPS,
+  rating and tags into the sidecar, for a RAF darktable's `DSCF1234.RAF.xmp`.
+  It edits the file with exiftool and keeps darktable's edit history. Rating,
+  description, date and GPS are written by both programs, so change them in
+  Immich only. With a read-only mount these writes fail (a failed "Sidecar"
+  job per change).
 - **darktable/Lightroom keywords don't show up as Immich tags.** A tag added
   through the API locks the asset's tag list in Immich, so keywords that
   darktable writes into the sidecar later are ignored. Ratings and descriptions

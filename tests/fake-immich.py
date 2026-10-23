@@ -16,7 +16,8 @@ fields are rejected, as v4 will): trashed assets match unless trashedAt is
 filtered, originalPath.startsWith is a case-insensitive prefix, withExif is a
 left join, paging is by cursor. Bulk adds report existing members as
 "duplicate", and creating a stack replaces any stack whose primary asset is
-one of the given assets.
+one of the given assets. PUT /assets sets visibility, rating (null, -1 or
+1-5; 0 is refused as in Immich 3) and isFavorite.
 """
 import json
 import os
@@ -62,7 +63,7 @@ def index_library():
                 continue
             i = new_id()
             assets[i] = {"id": i, "originalPath": path, "originalFileName": f, "libraryId": LIBRARY_ID,
-                         "visibility": "timeline", "isOffline": False, "stackId": None,
+                         "visibility": "timeline", "isOffline": False, "stackId": None, "isFavorite": False,
                          "deletedAt": "2026-10-01T00:00:00.000Z" if TRASH and TRASH in f else None}
             for key, model in EXIF.items():
                 if key in f:
@@ -199,12 +200,18 @@ class Handler(BaseHTTPRequestHandler):
             albums[a["id"]] = a
             return self.reply(201, {"id": a["id"], "albumName": a["albumName"], "assetCount": 0})
         if method == "PUT" and p == "/api/assets":
+            if body.get("rating", 1) == 0:
+                return self.reply(400, {"message": "Rating must be -1 (rejected), 1-5 (starred), or null (unrated)"})
             for i in body["ids"]:
                 if "visibility" in body:
                     assets[i]["visibility"] = body["visibility"]
+                if "isFavorite" in body:
+                    assets[i]["isFavorite"] = body["isFavorite"]
+                if "rating" in body:
+                    exif.setdefault(i, {})["rating"] = body["rating"]
             return self.reply(204)
         if method == "POST" and p == "/api/_user":
-            # Test-only: what a user does in the web UI, {"op": ..., "path": ...}
+            # Test-only: what a user does in the web UI, {"op": ..., "path": ..., "value": ...}
             op, path = body["op"], body.get("path")
             ids = [i for i, a in assets.items() if a["originalPath"] == path]
             if op == "wipe":
@@ -225,6 +232,10 @@ class Handler(BaseHTTPRequestHandler):
                 elif op == "untag":
                     for members in tag_assets.values():
                         members.discard(i)
+                elif op == "rate":
+                    exif.setdefault(i, {})["rating"] = body["value"]
+                elif op == "favorite":
+                    assets[i]["isFavorite"] = body["value"]
                 elif op == "unarchive":
                     assets[i]["visibility"] = "timeline"
                 elif op == "trash":
@@ -250,6 +261,9 @@ class Handler(BaseHTTPRequestHandler):
                 "albums": {a["albumName"]: sorted(assets[i]["originalPath"] for i in a["assets"])
                            for a in albums.values()},
                 "stacks": [[assets[i]["originalPath"] for i in s["assets"]] for s in stacks.values()],
+                # path -> [rating, favorite]
+                "ratings": {a["originalPath"]: [(exif.get(i) or {}).get("rating"), a["isFavorite"]]
+                            for i, a in assets.items()},
             })
         return self.reply(404, {"message": f"no route {method} {p}"})
 

@@ -171,6 +171,15 @@ How the implementation maps onto the plan:
   Immich's own periodic scan has to be off, or it re-imports a deleted photo
   before the hook sees it. The hook still deletes the file then, and the
   re-imported asset goes offline.
+- **Update 2026-10-23: read-write mount.** Mounted read-write, Immich deletes
+  the original and its sidecar itself, so its periodic scan can stay on; the
+  hook's deletion stays as the fallback for read-only mounts. Immich then also
+  writes ratings and other changes into `<file>.xmp`, where darktable reads
+  them: photos are rated in Immich and edited in darktable. Because the stack
+  cover is the JPEG, `immich-hook --sync` (every `SYNC_INTERVAL`, default 5
+  minutes, in the container) copies a rating or favorite between the files of
+  a pair, so the RAF's sidecar carries it. library.json records the last
+  copied values, so whichever file changed since wins (the JPEG if both did).
 - Each file's mtime is the capture instant (the UTC PTP date). "Already in
   the library" means the same name with the same size **and** mtime in the day
   folder of the UTC date or the day on either side of it. The EXIF folder isn't known

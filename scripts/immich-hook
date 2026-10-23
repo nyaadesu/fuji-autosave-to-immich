@@ -11,9 +11,10 @@ The receiver writes straight into the external library root
   5. stacks each JPEG+RAF pair (JPEG as cover), or with RAW_MODE=archive
      archives the paired RAF instead,
   6. adds each RAF to the RAW_ALBUM_NAME album,
-  7. logs a summary.
+  7. keeps the rating and favorite of each JPEG+RAF pair the same (see below),
+  8. logs a summary.
 
-Steps 4-6 look at the whole library, so anything an earlier run missed (scan
+Steps 4-7 look at the whole library, so anything an earlier run missed (scan
 timeout, Immich down) is caught up, but each step is done only once per file:
 $FUJI_STATE_DIR/library.json records what was done, so unstacking a pair,
 removing a RAF from the album, untagging or unarchiving in Immich sticks.
@@ -27,6 +28,17 @@ the hook deletes the file and its darktable sidecar (<file>.xmp). Only files
 whose asset the hook has recorded before are deleted, never more than
 DELETE_LIMIT per run or more than half the library, and nothing if Immich
 lists no assets at all; a run that would is stopped with an error instead.
+(With a read-write mount Immich deletes the file itself; this is the fallback.)
+
+Pairs: Immich is where photos are rated, darktable reads the rating from the
+RAF's sidecar (Immich writes <file>.xmp when a rating changes). The stack
+cover is the JPEG, so a rating or favorite set on one file of a pair is
+copied to the other: whichever changed since the last run wins, the JPEG if
+both did; the first time, the one that is set.
+
+--sync runs steps 1 and 4-7 without a scan or batch processing; the
+container runs it every SYNC_INTERVAL seconds. It skips while another run
+holds the lock and logs only what it changed, and errors.
 
 Settings come from the environment and from $FUJI_ENV_FILE
 (default /etc/fuji-autosave/env; see packaging/fuji-autosave.env.example):
@@ -48,8 +60,8 @@ Settings come from the environment and from $FUJI_ENV_FILE
   DELETE_LIMIT          most files deleted in one run (default 50)
 
 Set by the receiver: FUJI_STATE_DIR, FUJI_INBOX, FUJI_BATCH_*, FUJI_CAMERA_*.
-Run it by hand as the service user to retry pending batches, or with --check
-to test the settings and the API key.
+Run it by hand as the service user to retry pending batches, with --check
+to test the settings and the API key, or with --sync as above.
 """
 import fcntl
 import glob
@@ -198,9 +210,11 @@ class Immich:
 
 class State:
     """$FUJI_STATE_DIR/library.json: {"assets": {container path: {"id": asset id,
-    "done": [steps]}}}. A path is recorded once Immich has an asset for it. Steps
-    are "stack", "archive", and "tag:<tag or prefix*>" and "album:<name>", so a
-    changed CAMERA_TAG(_PREFIX) or RAW_ALBUM_NAME applies once to everything."""
+    "done": [steps], "pair": {field: value}}}}. A path is recorded once Immich
+    has an asset for it. Steps are "stack", "archive", and "tag:<tag or prefix*>"
+    and "album:<name>", so a changed CAMERA_TAG(_PREFIX) or RAW_ALBUM_NAME
+    applies once to everything. "pair" (on a pair's JPEG) holds the rating and
+    favorite last made the same on both files."""
 
     def __init__(self, cfg):
         self.path = os.path.join(cfg["state_dir"], "library.json")
@@ -425,6 +439,37 @@ def tag_assets(immich, cfg, state, assets, session_paths):
     return added, unknown
 
 
+def sync_pairs(immich, state, pairs):
+    """Give both files of each pair the same rating and favorite; return how many
+    assets were changed."""
+    fields = {
+        # Immich 3 has no rating 0: null is unrated
+        "rating": lambda a: (a["exifInfo"].get("rating") or None) if a.get("exifInfo") else None,
+        "isFavorite": lambda a: bool(a.get("isFavorite")),
+    }
+    updates = {}  # (field, value) -> asset ids
+    for jpg, raf in pairs:
+        if not (jpg.get("exifInfo") and raf.get("exifInfo")):
+            continue  # metadata not read yet, so the rating isn't known
+        synced = state.assets[jpg["originalPath"]].setdefault("pair", {})
+        for field, get in fields.items():
+            j, r = get(jpg), get(raf)
+            if j != r:
+                last = synced.get(field, "unknown")
+                if last == "unknown":
+                    jpg_wins = j not in (None, False) or r in (None, False)
+                else:
+                    jpg_wins = j != last
+                value, target = (j, raf) if jpg_wins else (r, jpg)
+                updates.setdefault((field, value), []).append(target["id"])
+                j = value
+            synced[field] = j
+    for (field, value), ids in updates.items():
+        for chunk in chunks(ids):
+            immich.call("PUT", "/assets", {"ids": chunk, field: value})
+    return sum(len(ids) for ids in updates.values())
+
+
 def ensure_album(immich, name):
     for a in immich.call("GET", "/albums?isOwned=true"):
         if a["albumName"] == name:
@@ -432,7 +477,7 @@ def ensure_album(immich, name):
     return immich.call("POST", "/albums", {"albumName": name})["id"], True
 
 
-def reconcile(immich, cfg, state, new_paths, session_paths):
+def reconcile(immich, cfg, state, new_paths, session_paths, quiet=False):
     root = cfg["container_root"] + "/"
     assets = [a for a in immich.assets(cfg["library"], with_exif=True, originalPath={"startsWith": root})
               if a["originalPath"].startswith(root)]
@@ -442,7 +487,7 @@ def reconcile(immich, cfg, state, new_paths, session_paths):
     stats = {"assets": len(assets)}
 
     stats["tagged"], unknown = tag_assets(immich, cfg, state, assets, session_paths)
-    if unknown:
+    if unknown and not quiet:
         log(f"{unknown} asset(s) not tagged yet: Immich has no camera model for them; a later run will")
 
     # Pair JPEG and RAF by folder + stem
@@ -494,6 +539,8 @@ def reconcile(immich, cfg, state, new_paths, session_paths):
             if a["id"] in ok:
                 state.mark(a, album_step)
 
+    stats["pair_synced"] = sync_pairs(immich, state, pairs)
+
     # Unpaired files among this run's new ones
     paired = {a["originalPath"] for p in pairs for a in p}
     stats["unpaired"] = sorted(p for p in new_paths if p in by_path and kind(p) and p not in paired)
@@ -518,6 +565,20 @@ def run(cfg):
     immich = Immich(cfg)
     if "--check" in sys.argv[1:]:
         check(immich, cfg)
+        return 0
+    if "--sync" in sys.argv[1:]:
+        immich.require_version()
+        state = State(cfg)
+        deleted = remove_deleted(immich, cfg, state)
+        try:
+            stats = reconcile(immich, cfg, state, set(), set(), quiet=True)
+        finally:
+            state.save()
+        changes = {"tagged": stats["tagged"], "stacked": stats["stacked"], "archived": stats["archived"],
+                   "added to the RAW album": stats["album"], "pair rating/favorite(s) copied": stats["pair_synced"]}
+        changes = ", ".join(f"{n} {what}" for what, n in changes.items() if n)
+        if changes:
+            log(f"sync: {changes}")
         return 0
 
     batches = load_batches(cfg)
@@ -557,22 +618,26 @@ def run(cfg):
                 else f"{stats['archived']} paired RAF(s) archived")
     log(f"done: {len(wanted) - len(missing)} new file(s) found, {len(missing)} still missing; "
         f"{stats['tagged']} tagged, {raw_line}, {stats['album']} RAF(s) added to {cfg['album']!r}, "
-        f"{deleted} deleted ({stats['assets']} asset(s) in the library)")
+        f"{stats['pair_synced']} pair rating/favorite(s) copied, {deleted} deleted ({stats['assets']} asset(s) in the library)")
     for p in stats["unpaired"]:
         log(f"unpaired: {p}")
     return 1 if missing else 0
 
 
 def main():
+    background = "--sync" in sys.argv[1:]
     try:
         cfg = config()
         os.makedirs(cfg["state_dir"], exist_ok=True)
         # One hook at a time; a later run waits, then picks up whatever is still queued
         with open(os.path.join(cfg["state_dir"], "hook.lock"), "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | (fcntl.LOCK_NB if background else 0))
+            except BlockingIOError:
+                return 0  # another run is going and does the same
             return run(cfg)
     except Fail as e:
-        log(f"error: {e}; pending batches stay queued")
+        log(f"error: {e}" + ("" if background else "; pending batches stay queued"))
         return 1
 
 

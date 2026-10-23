@@ -56,11 +56,15 @@ only goes to the smartphone app.
    remove from the album, untag) stays that way. The hook works over the whole
    library, so a batch that timed out or hit an Immich outage stays queued and
    is caught up by the next run.
-6. A photo you delete in Immich for good (after its trash) would come back with
-   the next scan, because Immich can't delete files from the read-only library.
-   Before scanning, the hook therefore deletes such files itself, with their
-   darktable `.xmp`. It has safety stops against mass deletion, and
-   `DELETE_REMOVED=0` turns it off.
+6. A photo you delete in Immich for good (after its trash) is deleted from
+   disk by Immich itself, since it mounts the library read-write. With a
+   read-only mount it would come back with the next scan, so before scanning,
+   the hook deletes such files itself, with their `.xmp`. It has safety stops
+   against mass deletion, and `DELETE_REMOVED=0` turns it off.
+7. Photos are rated in Immich, which writes the rating into `<file>.xmp`;
+   darktable reads it there. Every `SYNC_INTERVAL` seconds between batches
+   (`immich-hook --sync`), the rating or favorite you gave a stack's JPEG is
+   copied to its RAF (and the other way round), and anything missed is caught up.
 
 If a download fails partway through, the daemon drops the session. A half-read
 object leaves Fuji cameras unresponsive (see libfuji `lib/jank.c`). Files that

@@ -14,10 +14,11 @@ services:
     # so it needs the host's LAN address: host networking (or macvlan)
     network_mode: host
     restart: unless-stopped
-    # Owner of the files it writes; match the dataset's owner / your SMB user
+    # Owner of the files it writes. The group is shared with Immich's user (it
+    # deletes files and writes sidecars) and your SMB user: docs/deploy-docker.md
     user: "1000:1000"
     volumes:
-      # Read-write here; immich-server mounts the same dataset read-only
+      # Read-write here and in immich-server
       - /data2/fuji:/fuji
       # seen.tsv, batch lists, library.json
       - /data2/config/fuji-autosave:/var/lib/fuji-autosave
@@ -25,8 +26,8 @@ services:
       # --- Receiver ---
       # Name the camera shows in its PC AutoSave list (1-24 characters)
       FUJI_CLIENT_NAME: fuji-inbox
-      # 002: new folders/files group-writable for an SMB editing group
-      FUJI_UMASK: "022"
+      # 002: new folders/files group-writable, for Immich and an SMB editing group
+      FUJI_UMASK: "002"
       # e.g. --verbose
       FUJI_EXTRA_ARGS: ""
       # Empty: only receive files, no Immich step
@@ -51,9 +52,14 @@ services:
       RAW_MODE: stack
       # Seconds to wait for Immich to index a batch
       SCAN_TIMEOUT: "900"
-      # Delete a file (and its darktable .xmp) once its photo is deleted for good
-      # in Immich; more than DELETE_LIMIT in one run stops the hook instead
+      # Delete a file (and its .xmp) once its photo is deleted for good in Immich,
+      # if Immich couldn't (read-only mount); more than DELETE_LIMIT in one run
+      # stops the hook instead
       DELETE_REMOVED: "1"
       DELETE_LIMIT: "50"
+      # Every SYNC_INTERVAL seconds (0: off): copy a rating or favorite between
+      # the JPEG and RAF of a pair, catch up on tags, stacks and the RAW album,
+      # and delete as above
+      SYNC_INTERVAL: "300"
     # A hook still waiting for an Immich scan gets time to finish
     stop_grace_period: 5m
