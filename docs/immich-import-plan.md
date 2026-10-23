@@ -4,7 +4,7 @@ This document is the agreed design for the camera import app. Use it as the sour
 
 ## Goal
 
-Pull photos from a Fujifilm X-T30 II (shooting RAF + JPEG) onto the home server "roxy" so that:
+Pull photos from a Fujifilm camera shooting RAF + JPEG onto a server that runs Immich, so that:
 
 1. The camera JPEGs show in the Immich timeline right away for viewing.
 2. The RAF files are kept on disk as plain files that darktable or Lightroom Classic can open and edit in place over SMB.
@@ -14,41 +14,41 @@ Immich is the viewer and organiser. Editing happens in darktable / Lightroom Cla
 
 ## Storage layout
 
-Runs on roxy (Proxmox, ZFS pool `data2`, mounted at `/data2`). Existing datasets: `data2/backup`, `data2/config`, `data2/immich`, `data2/media`.
+The examples assume a ZFS pool `tank`, mounted at `/tank`, with Immich's upload location on its own dataset.
 
 ```
-/data2/immich            Immich upload library (existing dataset, managed by Immich, do not write here)
-/data2/fuji              new dataset data2/fuji: external library root for this app, shared over SMB for editing
+/tank/immich            Immich upload library (existing dataset, managed by Immich, do not write here)
+/tank/fuji              new dataset tank/fuji: external library root for this app, shared over SMB for editing
 ```
 
-`/data2/fuji` must stay outside `/data2/immich`. Immich rejects external library paths inside its upload location.
+`/tank/fuji` must stay outside `/tank/immich`. Immich rejects external library paths inside its upload location.
 
-Dataset creation (one-time, done by the user, listed for context):
+Dataset creation (one-time):
 
 ```
-zfs create -o recordsize=1M -o compression=lz4 data2/fuji
+zfs create -o recordsize=1M -o compression=lz4 tank/fuji
 ```
 
 File layout inside the external library:
 
 ```
-/data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.JPG
-/data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF
-/data2/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF.xmp   (written later by darktable, never by this app)
+/tank/fuji/YYYY/YYYY-MM-DD/DSCF1234.JPG
+/tank/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF
+/tank/fuji/YYYY/YYYY-MM-DD/DSCF1234.RAF.xmp   (written later by darktable, never by this app)
 ```
 
 - Date folder comes from the capture date in EXIF (fall back to file mtime if EXIF is missing).
 - Keep the camera's original filenames. JPEG and RAF share the stem `DSCF1234`, which is how pairs are matched.
 - The app never modifies, renames or deletes files after they are written. Immich treats a moved file as a deleted asset plus a new one, which drops it from albums and stacks.
 
-## Immich configuration (one-time, done by the user)
+## Immich configuration (one-time)
 
 Mount into `immich-server` read-only:
 
 ```yaml
 immich-server:
   volumes:
-    - /data2/fuji:/mnt/fuji:ro
+    - /tank/fuji:/mnt/fuji:ro
 ```
 
 - Create an external library owned by the user's account with import path `/mnt/fuji` (container path, not host path). Store its library ID in the app config.
@@ -62,7 +62,7 @@ App config values:
 | `IMMICH_URL` | `http://immich.lan:2283` |
 | `IMMICH_API_KEY` | from env / secrets, never committed |
 | `LIBRARY_ID` | external library UUID |
-| `PHOTO_ROOT_HOST` | `/data2/fuji` (where the app writes) |
+| `PHOTO_ROOT_HOST` | `/tank/fuji` (where the app writes) |
 | `PHOTO_ROOT_CONTAINER` | `/mnt/fuji` (path Immich sees, needed for path lookups) |
 | `RAW_ALBUM_NAME` | `Fuji RAW` |
 | `CAMERA_TAG` | `Camera/X-T30 II` |
@@ -103,9 +103,9 @@ It is not confirmed how Immich displays a RAF that is the non-cover member of a 
 
 ## Out of scope / later
 
-- Rendering darktable edits in Immich. Immich currently ignores development settings in XMP. A possible later addition: a container that runs `darktable-cli` on any RAF whose `.RAF.xmp` changed and writes JPEGs to a separate folder or library (e.g. a separate `data2/fuji-edits` dataset, kept outside `/data2/fuji` so exported JPEGs never get mixed into RAF/JPEG pairing).
-- Off-box backup of `data2/fuji` (ZFS snapshot send to another machine). Handled outside this app.
-- If Immich runs in an LXC on Proxmox, `/data2/fuji` must also be bind-mounted into that container (`pct set <id> -mpX ...`) before the Docker volume line above can see it. Same for wherever this app runs.
+- Rendering darktable edits in Immich. Immich currently ignores development settings in XMP. A possible later addition: a container that runs `darktable-cli` on any RAF whose `.RAF.xmp` changed and writes JPEGs to a separate folder or library (e.g. a separate `tank/fuji-edits` dataset, kept outside `/tank/fuji` so exported JPEGs never get mixed into RAF/JPEG pairing).
+- Off-box backup of `tank/fuji` (ZFS snapshot send to another machine). Handled outside this app.
+- If Immich runs in an LXC on Proxmox, `/tank/fuji` must also be bind-mounted into that container (`pct set <id> -mpX ...`) before the Docker volume line above can see it. Same for wherever this app runs.
 
 ---
 
@@ -128,7 +128,7 @@ and server source (latest release on 2026-10-22). Recheck after a major upgrade.
 How the implementation maps onto the plan:
 
 - **Step 1 is the receiver itself.** The camera pushes over PTP/IP, so there
-  is no card to copy from. The receiver LXC bind-mounts `/data2/fuji` at `/fuji` (so it works the
+  is no card to copy from. The receiver LXC bind-mounts `/tank/fuji` at `/fuji` (so it works the
   same wherever the dataset lives on the host), and `fuji-autosave-receiver --inbox /fuji` writes
   `YYYY/YYYY-MM-DD/NAME`, keeping the camera's file names. As the plan says,
   the date comes from EXIF `DateTimeOriginal` of the downloaded file (a RAF

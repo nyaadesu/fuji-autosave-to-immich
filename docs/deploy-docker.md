@@ -7,9 +7,9 @@ nothing has to be set up from scratch on a reinstall. (The manual Alpine LXC
 setup is still described in [deploy-lxc.md](deploy-lxc.md).)
 
 ```
-host /data2/fuji ──> fuji-autosave  /fuji      (read-write, the receiver's inbox)
-                 ──> immich-server  /mnt/fuji  (read-write, the library's import path)
-                 ──> SMB            darktable / Lightroom
+host /tank/fuji ──> fuji-autosave  /fuji      (read-write, the receiver's inbox)
+                ──> immich-server  /mnt/fuji  (read-write, the library's import path)
+                ──> SMB            darktable / Lightroom
 ```
 
 The design is in [immich-import-plan.md](immich-import-plan.md).
@@ -33,14 +33,13 @@ The design is in [immich-import-plan.md](immich-import-plan.md).
 
 - **The dataset**, mounted at the same path on the Docker host. If Docker runs
   in an LXC on Proxmox, bind-mount it there first
-  (`pct set <id> -mpX /data2/fuji,mp=/data2/fuji`).
+  (`pct set <id> -mpX /tank/fuji,mp=/tank/fuji`).
 
 ## 2. Dataset and ownership
 
 ```sh
-zfs create -o recordsize=1M -o compression=lz4 data2/fuji
-mkdir -p /data2/config/fuji-autosave
-chown 1000:1000 /data2/fuji /data2/config/fuji-autosave
+zfs create -o recordsize=1M -o compression=lz4 tank/fuji
+chown 1000:1000 /tank/fuji
 ```
 
 The container runs as `user: "1000:1000"` (in `compose.yaml`), and new files
@@ -52,14 +51,14 @@ the folders setgid so new files keep the group. `FUJI_UMASK: "002"` (the
 default) makes new folders and files group-writable. On the host:
 
 ```sh
-chgrp -R 2000 /data2/fuji && find /data2/fuji -type d -exec chmod 2775 {} +
+chgrp -R 2000 /tank/fuji && find /tank/fuji -type d -exec chmod 2775 {} +
 ```
 
 In an unprivileged LXC, host ids are shifted by 100000 (container uid 1000 =
 host uid 101000, container gid 2000 = host gid 102000): use host gid 102000
 above, and the same gid 2000 in every LXC that shares the dataset.
 
-Keep ZFS snapshots of `data2/fuji` (sanoid, zfs-auto-snapshot). The hook deletes
+Keep ZFS snapshots of `tank/fuji` (sanoid, zfs-auto-snapshot). The hook deletes
 files that you deleted in Immich, and snapshots are the safety net.
 
 ## 3. Immich (one time)
@@ -70,7 +69,7 @@ Needs **Immich 3.2 or newer**. Mount the dataset **read-write** into
 ```yaml
 immich-server:
   volumes:
-    - /data2/fuji:/mnt/fuji
+    - /tank/fuji:/mnt/fuji
 ```
 
 Read-write, because deleting a photo for good in Immich then deletes its file
@@ -78,7 +77,7 @@ and sidecar (with a read-only mount the next scan would import it again), and
 because Immich writes ratings and other changes into `<file>.xmp`, where
 darktable reads them (see [Ratings and darktable](#ratings-and-darktable)).
 Immich's user needs the group from step 2. If Immich runs natively in an LXC,
-bind-mount the dataset there (`pct set <id> -mpX /data2/fuji,mp=/fuji`), add
+bind-mount the dataset there (`pct set <id> -mpX /tank/fuji,mp=/fuji`), add
 its user to the group (`groupadd -g 2000 fuji && usermod -aG fuji immich`,
 then restart Immich), and use `/fuji` as the import path and as
 `PHOTO_ROOT_CONTAINER`.
@@ -86,7 +85,9 @@ then restart Immich), and use `/fuji` as the import path and as
 Then, in the Immich web UI:
 
 1. Administration → External Libraries → Create library, owned by your own
-   user, import path `/mnt/fuji`. Note its ID (shown in the page URL).
+   user, import path `/mnt/fuji`, with the exclusion patterns `**/.incoming/**`
+   (partial downloads) and `**/.fuji-autosave/**` (the receiver's state). Note
+   its ID (shown in the page URL).
 2. Periodic scanning of external libraries (Administration → Settings →
    External Library) can stay on. With a read-only mount it has to be off,
    or a scan imports a photo deleted in Immich again before the hook
@@ -120,6 +121,41 @@ git clone https://github.com/nyaadesu/fuji-autosave-to-immich && cd fuji-autosav
 scripts/fetch-deps.sh
 docker compose build
 ```
+
+### Immich in the same compose project
+
+If Immich runs with Docker Compose on the same host, both can be managed from
+one place. Keep Immich's `docker-compose.yml` (from its release) and this
+`compose.yaml` in their own folders, each with its own `.env`, and join them
+with a top-level file next to the two folders:
+
+```yaml
+name: immich
+include:
+  - immich/docker-compose.yml
+  - fuji-autosave/compose.yaml
+```
+
+`docker compose up -d`, `pull`, `ps` and `logs -f <service>` there then cover
+both. An included file reads the `.env` in its own folder, so neither app gets
+the other's secrets. `IMMICH_URL` stays `http://127.0.0.1:2283`. For the hook
+and darktable, `immich-server` needs the library mounted read-write at
+`PHOTO_ROOT_CONTAINER`, the library's group, and a umask that keeps the
+sidecars it writes group-writable:
+
+```yaml
+services:
+  immich-server:
+    volumes:
+      - /tank/fuji:/mnt/fuji
+    group_add:
+      - "2000"   # the library's group (step 2)
+    # The image runs `bash -c start.sh`
+    command: ["umask 0007 && exec start.sh"]
+```
+
+Add these to Immich's `docker-compose.yml`, and compare it with the new
+release's file when you update Immich.
 
 ## 5. Pair the camera
 
@@ -156,10 +192,10 @@ description, date or location in Immich, it writes that into the file's
 | Verbose protocol log | set `FUJI_EXTRA_ARGS: "--verbose"`, then `docker compose up -d` |
 
 On stop, a hook that is still waiting for an Immich scan gets up to 5 minutes
-(`stop_grace_period`). The state in `/data2/config/fuji-autosave` (`seen.tsv`,
-queued batch lists, `library.json`) survives updates and reinstalls. Keep it
-together with the dataset. Without `library.json`, the hook treats every photo
-as new once.
+(`stop_grace_period`). The state (`seen.tsv`, queued batch lists,
+`library.json`) is in `.fuji-autosave/` in the library, so it survives updates
+and reinstalls, and the dataset's snapshots cover it. Without `library.json`,
+the hook treats every photo as new once.
 
 See [deploy-lxc.md § Things to know](deploy-lxc.md#things-to-know) for how
 deletion, sidecars, tags and file times behave. That applies here too.

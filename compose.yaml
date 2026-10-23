@@ -18,10 +18,9 @@ services:
     # deletes files and writes sidecars) and your SMB user: docs/deploy-docker.md
     user: "1000:1000"
     volumes:
-      # Read-write here and in immich-server
-      - /data2/fuji:/fuji
-      # seen.tsv, batch lists, library.json
-      - /data2/config/fuji-autosave:/var/lib/fuji-autosave
+      # Read-write here and in immich-server. The receiver's state (seen.tsv,
+      # batch lists, library.json) goes in .fuji-autosave/ there
+      - /tank/fuji:/fuji
     environment:
       # --- Receiver ---
       # Name the camera shows in its PC AutoSave list (1-24 characters)

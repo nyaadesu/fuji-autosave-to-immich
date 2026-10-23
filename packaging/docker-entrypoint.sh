@@ -17,6 +17,7 @@ receiver)
 		echo "error: $FUJI_INBOX is missing or not writable by uid $(id -u): mount the photo library there and check its ownership (see docs/deploy-docker.md)" >&2
 		exit 1
 	fi
+	mkdir -p "$FUJI_STATE_DIR"
 	if ! mountpoint -q "$FUJI_INBOX"; then
 		echo "warning: $FUJI_INBOX is not a mount point; received files would stay inside the container" >&2
 	fi

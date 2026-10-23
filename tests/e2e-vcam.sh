@@ -56,11 +56,13 @@ fi
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# One AutoSave session: receiver waits, vcam pushes, receiver exits (--once)
+# One AutoSave session: receiver waits, vcam pushes, receiver exits (--once).
+# session N [COMMAND]: COMMAND runs while the receiver waits, before vcam starts
 session() {
 	"$RECV" -i "$WORK/inbox" -s "$WORK/state" -x "$WORK/hook.sh" --once -v > "$WORK/recv-$1.log" 2>&1 &
 	rp=$!
 	sleep 1
+	[ -z "${2:-}" ] || "$2" "$1"
 	( cd "$ROOT/build/vcam" && exec build/vcam fuji_x_t4 tcp --discovery --fs "$WORK/sd" ) > "$WORK/vcam-$1.log" 2>&1 &
 	vp=$!
 	i=0
@@ -113,5 +115,26 @@ session 3
 grep -q 'session done: 0 new, 0 already seen, 2 already in the inbox' "$WORK/recv-3.log" || fail "lost seen list caused re-downloads"
 [ "$(ls "$WORK/inbox/$day" | wc -l)" -eq 2 ] || fail "duplicate files after lost seen list"
 [ ! -e "$WORK/state/hook-saw.list" ] || fail "hook ran for files already in the inbox"
+
+# A new address while the receiver waits (a new DHCP lease): discovery bound to
+# the old one, so the receiver restarts it on the new one and the camera still
+# gets through
+change_ip() {
+	# Only once discovery is up and waiting, past its first address check
+	i=0
+	until grep -q 'Binding to 51541' "$WORK/recv-$1.log"; do
+		i=$((i + 1)); [ $i -lt 20 ] || fail "discovery did not start"; sleep 1
+	done
+	sleep 2
+	ip addr del 192.168.1.10/24 dev d0
+	ip addr add 192.168.1.11/24 dev d0
+	ip route replace default dev d0
+	i=0
+	until grep -q 'local address changed from 192.168.1.10 to 192.168.1.11' "$WORK/recv-$1.log"; do
+		i=$((i + 1)); [ $i -lt 20 ] || fail "receiver did not notice the new address"; sleep 1
+	done
+}
+session 4 change_ip
+grep -q 'session done: 0 new, 2 already seen' "$WORK/recv-4.log" || fail "no session on the new address"
 
 echo "e2e: all checks passed"

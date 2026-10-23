@@ -11,8 +11,8 @@ collects the RAFs in an album. The RAFs stay plain files that darktable or
 Lightroom can edit in place over SMB. You don't need a PC, a phone or a cable.
 The design is in [docs/immich-import-plan.md](docs/immich-import-plan.md).
 
-It was written for an X-T30 II feeding a home-server Immich, but nothing here is
-specific to that body.
+It was developed and tested with an X-T30 II, but nothing here is specific to
+that body.
 
 ## Status
 

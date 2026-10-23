@@ -23,8 +23,10 @@ RUN apk add --no-cache libusb python3 tini \
 COPY --from=build /out/usr/local /usr/local
 COPY --chmod=755 packaging/docker-entrypoint.sh /usr/local/bin/docker-entrypoint
 
+# The state (seen.tsv, batch lists, library.json) lives with the photos, so
+# snapshots and backups of the library cover it
 ENV FUJI_INBOX=/fuji \
-	FUJI_STATE_DIR=/var/lib/fuji-autosave \
+	FUJI_STATE_DIR=/fuji/.fuji-autosave \
 	FUJI_CLIENT_NAME=fuji-inbox \
 	FUJI_HOOK=/usr/local/lib/fuji-autosave/immich-hook \
 	FUJI_UMASK=022 \

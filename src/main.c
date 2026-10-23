@@ -11,6 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -22,6 +25,7 @@
 #include "seen.h"
 
 #define RETRY_DELAY_SEC 5
+#define IP_CHECK_SEC 5
 // The init packet carries the name as UTF-16 in 54 bytes
 #define MAX_CLIENT_NAME 24
 
@@ -137,7 +141,43 @@ void app_send_cam_name(struct PtpRuntime *r, const char *name) {
 void app_update_storage_info(struct PtpRuntime *r) { (void)r; }
 void app_report_download_speed(struct PtpRuntime *r, long time, size_t size) { (void)r; (void)time; (void)size; }
 int app_check_thread_cancel(struct PtpRuntime *r) { (void)r; return g_stop; }
-int fuji_discovery_check_cancel(struct PtpRuntime *r) { (void)r; return g_stop; }
+
+// libfuji takes the local address once per discovery, binds to it and tells it
+// to the camera, then waits for the camera indefinitely. If DHCP hands out a new
+// address meanwhile, the camera can't connect any more, so the cancel hook ends
+// that discovery and the main loop starts one with the new address.
+static char g_discovery_ip[64];
+static int g_ip_changed;
+
+// The source address of the default route, as libfuji's get_local_ip() finds it
+static int route_ip(char out[64]) {
+	struct sockaddr_in dst = {.sin_family = AF_INET, .sin_port = htons(1234)};
+	dst.sin_addr.s_addr = inet_addr("1.1.1.1");
+	int fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0) return -1;
+	struct sockaddr_in name;
+	socklen_t len = sizeof(name);
+	int rc = connect(fd, (struct sockaddr *)&dst, sizeof(dst));
+	if (rc == 0) rc = getsockname(fd, (struct sockaddr *)&name, &len);
+	close(fd);
+	if (rc) return -1;
+	return inet_ntop(AF_INET, &name.sin_addr, out, 64) ? 0 : -1;
+}
+
+int fuji_discovery_check_cancel(struct PtpRuntime *r) {
+	(void)r;
+	if (g_stop) return 1;
+	static time_t last_check;
+	time_t now = time(NULL);
+	if (!g_discovery_ip[0] || now - last_check < IP_CHECK_SEC) return 0;
+	last_check = now;
+	char ip[64];
+	// No route (e.g. the link is down for a moment): keep waiting
+	if (route_ip(ip) || strcmp(ip, g_discovery_ip) == 0) return 0;
+	log_info("local address changed from %s to %s; restarting discovery", g_discovery_ip, ip);
+	g_ip_changed = 1;
+	return 1;
+}
 int plat_update_object_info(struct PtpRuntime *r, int handle, const struct PtpObjectInfo *oi) {
 	(void)r; (void)handle; (void)oi;
 	return 0;
@@ -647,9 +687,12 @@ int main(int argc, char **argv) {
 
 		struct PtpRuntime *dr = fuji_ptp_new(PTP_IP_USB);
 		struct DiscoverInfo info;
+		if (route_ip(g_discovery_ip)) g_discovery_ip[0] = '\0';
+		g_ip_changed = 0;
 		int rc = fuji_discover_thread(dr, &info, cfg.client_name);
 		free_runtime(dr);
 
+		if (rc == FUJI_D_CANCELED && g_ip_changed && !g_stop) continue;
 		if (rc == FUJI_D_CANCELED || g_stop) break;
 		if (rc == FUJI_D_REGISTERED) {
 			log_info("registered with %s (%s); select this PC on the camera to start transfers",

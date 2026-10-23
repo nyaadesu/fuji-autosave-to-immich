@@ -37,6 +37,6 @@ start_pre() {
 		return 1
 	fi
 	if ! mountpoint -q "$FUJI_INBOX"; then
-		ewarn "$FUJI_INBOX is not a mount point: is the data2/fuji bind mount missing? Files would stay in this container"
+		ewarn "$FUJI_INBOX is not a mount point: is the library's bind mount missing? Files would stay in this container"
 	fi
 }

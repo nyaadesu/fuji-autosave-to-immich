@@ -4,7 +4,7 @@
 > to install and update. This page is the manual alternative without Docker.
 
 The setup: an unprivileged **Alpine** LXC bridged onto the LAN runs the
-receiver as an OpenRC service. The ZFS dataset `data2/fuji` is bind-mounted
+receiver as an OpenRC service. The ZFS dataset `tank/fuji` is bind-mounted
 into it, and the receiver writes the camera's files straight into it. Immich
 reads and writes the same dataset as an
 [external library](https://docs.immich.app/features/libraries), and the hook
@@ -18,9 +18,9 @@ and bridge `vmbr0` with yours. See [immich-import-plan.md](immich-import-plan.md
 for the design.
 
 ```
-host /data2/fuji ──bind──> receiver LXC /fuji         (read-write, --inbox)
-                 ──bind──> immich-server  /mnt/fuji    (read-write, library import path)
-                 ──SMB───> darktable / Lightroom       (edit in place, .RAF.xmp sidecars)
+host /tank/fuji ──bind──> receiver LXC /fuji         (read-write, --inbox)
+                ──bind──> immich-server  /mnt/fuji    (read-write, library import path)
+                ──SMB───> darktable / Lightroom       (edit in place, .RAF.xmp sidecars)
 ```
 
 ## 1. Network: the container must be on the camera's LAN
@@ -32,14 +32,14 @@ broadcasts don't cross NAT.
 ## 2. Dataset and container (on the host)
 
 ```sh
-zfs create -o recordsize=1M -o compression=lz4 data2/fuji     # mounts at /data2/fuji
+zfs create -o recordsize=1M -o compression=lz4 tank/fuji     # mounts at /tank/fuji
 
 pveam update && pveam available | grep alpine     # download the current one with pveam
 # The template file name below is an example; use the one pveam downloaded
 pct create 140 local:vztmpl/alpine-3.24-default_20260601_amd64.tar.xz \
     --hostname fuji-autosave --unprivileged 1 --cores 1 --memory 512 \
     --net0 name=eth0,bridge=vmbr0,ip=dhcp --rootfs local-zfs:4 --onboot 1
-pct set 140 -mp0 /data2/fuji,mp=/fuji    # the container only ever sees /fuji
+pct set 140 -mp0 /tank/fuji,mp=/fuji    # the container only ever sees /fuji
 pct start 140
 
 # Reserve Fuji's ports from the ephemeral range (see packaging/90-fuji-autosave.conf).
@@ -49,11 +49,11 @@ pct exec 140 -- sysctl -w net.ipv4.ip_local_reserved_ports=51540-51562,55740-557
 
 Ownership: the container's `fuji` user (created below) maps to host UID
 `100000 + <its uid>`. Give that UID the dataset, for example
-`chown 100100:100101 /data2/fuji` if `id fuji` prints `uid=100 gid=101`.
+`chown 100100:100101 /tank/fuji` if `id fuji` prints `uid=100 gid=101`.
 For editing over SMB, the SMB user must be able to create `.RAF.xmp` files in
 the day folders. Either make the SMB share write as that UID (`force user`), or
 give the dataset a shared group: set the setgid bit
-(`chmod 2775 /data2/fuji`) and `FUJI_UMASK=002` in `/etc/conf.d/fuji-autosave`,
+(`chmod 2775 /tank/fuji`) and `FUJI_UMASK=002` in `/etc/conf.d/fuji-autosave`,
 so new folders and files are group-writable.
 
 Use a DHCP reservation so the container keeps a stable address. It isn't
@@ -72,13 +72,13 @@ and how ratings reach darktable:
 ```yaml
 immich-server:
   volumes:
-    - /data2/fuji:/mnt/fuji
+    - /tank/fuji:/mnt/fuji
 ```
 
-If Immich itself runs in an LXC, bind-mount `/data2/fuji` into that container
-first (`pct set <id> -mpX /data2/fuji,mp=/data2/fuji`), then use the line above
+If Immich itself runs in an LXC, bind-mount `/tank/fuji` into that container
+first (`pct set <id> -mpX /tank/fuji,mp=/tank/fuji`), then use the line above
 inside it. The dataset must not be inside Immich's upload location
-(`/data2/immich`), because Immich rejects such import paths.
+(`/tank/immich`), because Immich rejects such import paths.
 
 Then, in the Immich web UI:
 
@@ -166,7 +166,7 @@ Unstack the test pair by hand and rerun the hook.
   file and its `.xmp` itself. With a read-only mount, the hook's next run does.
   Only the hook has a safety stop: a run that would delete more than
   `DELETE_LIMIT` files fails instead and logs why. Immich deletes whatever you
-  empty from the trash. Keep ZFS snapshots of `data2/fuji` (e.g. with
+  empty from the trash. Keep ZFS snapshots of `tank/fuji` (e.g. with
   `zfs-auto-snapshot` or sanoid on the host) as the real safety net against
   mistakes. `DELETE_REMOVED=0` turns the hook's deletion off.
 - **The hook's memory is `/var/lib/fuji-autosave/library.json`.** Deleting
