@@ -26,12 +26,14 @@ jobs:
         env:
           IMAGE: fuji-autosave:ci
 
+      # :latest from main itself, not from "the default branch": a push to main
+      # before it became the default (or after a rename) would publish none
       - id: meta
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=sha
 
